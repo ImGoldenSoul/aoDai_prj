@@ -1,0 +1,8 @@
+/[Tt]emp/
+/[Ll]ibrary/
+/[Oo]bj/
+/[Bb]uild/
+/[Ll]ogs/
+/[MemoryCaptures]/
+*.csproj
+*.sln

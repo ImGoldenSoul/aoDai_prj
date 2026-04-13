@@ -1,4 +1,4 @@
-﻿using System;
+using System;
 using Unity.Collections;
 using Unity.Jobs;
 using Unity.Mathematics;
@@ -7,6 +7,22 @@ using UnityEngine.Profiling;
 
 namespace UCloth
 {
+
+    /// <summary>
+    /// A dynamic sewing constraint: pulls <see cref="nodeIndex"/> toward
+    /// <see cref="targetPosition"/> every simulation step.
+    /// Rest distance is 0 — the two sewn nodes are driven to coincide.
+    /// </summary>
+    public struct UCSewingConstraint
+    {
+        /// <summary>Node index on the cloth that owns this simData.</summary>
+        public ushort nodeIndex;
+        /// <summary>World-space target supplied each frame by the sewing manager.</summary>
+        public float3 targetPosition;
+        /// <summary>Constraint stiffness (0–1). 1 = fully rigid seam.</summary>
+        public float stiffness;
+    }
+
     /// <summary>
     /// Stores simulation data used by <see cref="UCCloth"/>.
     /// </summary>
@@ -30,6 +46,16 @@ namespace UCloth
         internal NativeArray<float3> cTempAcceleration;
 
         internal NativeArray<float> cFriction;
+
+
+        // --- Sewing Constraints (cross-cloth, zero-rest-distance)
+        /// <summary>
+        /// Writeable list of active sewing constraints for this cloth.
+        /// Populated each frame by <c>MeshSewer_UCloth</c> before the job runs.
+        /// The job reads this as a copy (<see cref="cSewingConstraints"/>).
+        /// </summary>
+        public NativeList<UCSewingConstraint> sewingConstraints;
+        internal NativeArray<UCSewingConstraint> cSewingConstraints;
 
 
         // --- Mesh Data
@@ -97,6 +123,10 @@ namespace UCloth
 
         internal void PrepareCopies()
         {
+
+            if (!sewingConstraints.IsCreated)
+                sewingConstraints = new NativeList<UCSewingConstraint>(16, Allocator.Persistent);
+
             if (!positionsReadOnly.IsCreated)
                 positionsReadOnly = new NativeArray<float3>(cPositions, Allocator.Persistent);
 
@@ -132,15 +162,32 @@ namespace UCloth
             {
                 // Pinned positions
                 cPinnedPositions.Clear();
-                NativeParallelHashMapCopyJob<ushort, float3> copyJob = new(pinnedPositions, cPinnedPositions);
 
-                var copyHandle = copyJob.ScheduleBatch(pinnedPositions.Capacity, 256);
-                copyHandle.Complete();
+                // Only schedule the copy job when there are actual pinned entries.
+                // ScheduleBatch with capacity=0 does not execute the job, which means
+                // [DeallocateOnJobCompletion] never fires and the TempJob KeyValues leak.
+                if (pinnedPositions.Count() > 0)
+                {
+                    NativeParallelHashMapCopyJob<ushort, float3> copyJob = new(pinnedPositions, cPinnedPositions);
+                    var copyHandle = copyJob.ScheduleBatch(pinnedPositions.Capacity, 256);
+                    copyHandle.Complete();
+                }
 
                 // Weight
                 cReciprocalWeight.CopyFrom(reciprocalWeight);
                 _applyPending = false;
             }
+
+            // Sync sewing constraints into a Persistent NativeArray.
+            // Resize (dispose + recreate) only when count changes — avoids TempJob leaks.
+            int sewCount = sewingConstraints.Length;
+            if (!cSewingConstraints.IsCreated || cSewingConstraints.Length != sewCount)
+            {
+                if (cSewingConstraints.IsCreated) cSewingConstraints.Dispose();
+                cSewingConstraints = new NativeArray<UCSewingConstraint>(sewCount, Allocator.Persistent);
+            }
+            if (sewCount > 0)
+                cSewingConstraints.CopyFrom(sewingConstraints.AsArray());
         }
 
 
@@ -177,6 +224,9 @@ namespace UCloth
             cReciprocalWeight.Dispose();
             pinnedPositions.Dispose();
             cPinnedPositions.Dispose();
+
+            if (sewingConstraints.IsCreated) sewingConstraints.Dispose();
+            if (cSewingConstraints.IsCreated) cSewingConstraints.Dispose();
 
             if (cSelfCollisionRegions.IsCreated())
                 cSelfCollisionRegions.Dispose();

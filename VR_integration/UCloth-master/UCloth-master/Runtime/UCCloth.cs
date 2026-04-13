@@ -275,6 +275,8 @@ namespace UCloth
                 pointQueryResults = pointQueryResults,
                 pointQueryIndexCounts = pointQueryIndexCounts,
 
+                sewingConstraints = simData.cSewingConstraints,
+
                 bounds = _meshRenderer.bounds,
                 optimizationData = optimizationData
             };
@@ -317,6 +319,7 @@ namespace UCloth
             sphereColDTOs.Dispose();
             capsuleColDTOs.Dispose();
             cubeColDTOs.Dispose();
+
 
             _job = null;
         }

@@ -109,7 +109,6 @@ namespace UCloth
                 UCEdge edge2 = GetHashedEdge(mesh, ind2, ind3);
                 UCEdge edge3 = GetHashedEdge(mesh, ind1, ind3);
 
-                // Add triangle using the three hashed vertex indices
                 trianglesCache.Add(new UCTriangle(edge1.nodeIndex1, edge1.nodeIndex2, edge2.nodeIndex2), i);
 
                 // And then create edges from the specified indices
@@ -182,19 +181,12 @@ namespace UCloth
 
                 if (commonNeighbours.Count == 2)
                 {
-                    // Try to find the triangles in the cache
-                    UCTriangle tri1Key = new UCTriangle(index1, index2, (ushort)commonNeighbours[0]);
-                    UCTriangle tri2Key = new UCTriangle(index2, index1, (ushort)commonNeighbours[1]);
+                    int tri1 = trianglesCache[new UCTriangle(index1, index2, (ushort)commonNeighbours[0])];
+                    int tri2 = trianglesCache[new UCTriangle(index2, index1, (ushort)commonNeighbours[1])];
 
-                    if (trianglesCache.ContainsKey(tri1Key) && trianglesCache.ContainsKey(tri2Key))
-                    {
-                        int tri1 = trianglesCache[tri1Key];
-                        int tri2 = trianglesCache[tri2Key];
-
-                        // Order shouldn't matter here
-                        UCBendingEdge bendingEdge = new(commonNeighbours[0], commonNeighbours[1], tri1, tri2);
-                        bendingEdges.Add(bendingEdge);
-                    }
+                    // Order shouldn't matter here
+                    UCBendingEdge bendingEdge = new(commonNeighbours[0], commonNeighbours[1], tri1, tri2);
+                    bendingEdges.Add(bendingEdge);
                 }
             }
 

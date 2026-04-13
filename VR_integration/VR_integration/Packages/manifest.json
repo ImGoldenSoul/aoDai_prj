@@ -1,6 +1,6 @@
 {
   "dependencies": {
-    "com.matusson.ucloth": "file:C:/Users/toikh/Downloads/UCloth-master/UCloth-master",
+    "com.matusson.ucloth": "file:C:/Users/toikh/Documents/3D_Museum/aoDai_prj/VR_integration/UCloth-master/UCloth-master",
     "com.unity.ai.navigation": "1.1.7",
     "com.unity.burst": "1.8.28",
     "com.unity.collab-proxy": "2.9.3",

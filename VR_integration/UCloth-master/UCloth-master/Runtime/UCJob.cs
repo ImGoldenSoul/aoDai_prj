@@ -56,6 +56,11 @@ namespace UCloth
         [ReadOnly]
         public NativeParallelHashMap<ushort, float3> pinnedPos;
 
+        // Sewing constraints (zero-rest-distance, cross-cloth)
+        [ReadOnly]
+        public NativeArray<UCSewingConstraint> sewingConstraints;
+
+
         // Colliders
         [ReadOnly]
         public NativeArray<SphereColDTO> sphereColliders;
@@ -131,6 +136,7 @@ namespace UCloth
             for (int i = 0; i < qualityProperties.constraintIterations; i++)
             {
                 ConstrainEdges();
+                ApplySewingConstraints();
             }
 
             constraintsMarker.End();
@@ -676,6 +682,35 @@ namespace UCloth
         }
 
         /// <summary>
+
+        /// <summary>
+        /// Applies zero-rest-distance positional constraints for sewn node pairs.
+        /// Each constraint drives its node toward a shared world-space target
+        /// (the midpoint between the two sewn nodes, computed on the main thread
+        /// and written into <see cref="sewingConstraints"/> before the job runs).
+        ///
+        /// Because reciprocalWeight is NOT zeroed, the node still participates
+        /// in gravity, springs, and collisions — it is merely pulled toward the
+        /// seam target with a configurable stiffness.
+        /// </summary>
+        private void ApplySewingConstraints()
+        {
+            for (int i = 0; i < sewingConstraints.Length; i++)
+            {
+                var c = sewingConstraints[i];
+                ushort idx = c.nodeIndex;
+
+                float3 delta = c.targetPosition - positions[idx];
+
+                // Position correction proportional to stiffness
+                positions[idx] += delta * c.stiffness;
+
+                // Velocity correction: damp the component that would move away from target
+                // and add an impulse toward target so the seam "sticks" under forces
+                velocity[idx] += delta * c.stiffness;
+            }
+        }
+
         /// Resets pinned nodes so they don't move.
         /// </summary>
         private void ResetPinned()
@@ -686,7 +721,11 @@ namespace UCloth
                 {
                     acceleration[i] = new();
                     velocity[i] = new();
-                    positions[i] = pinnedPos[i];
+                    // Use TryGetValue to avoid crash when key is not yet in the map
+                    // (e.g. when reciprocalWeight was set to 0 externally but pinnedPositions
+                    // has not been populated yet, such as during dynamic sewing)
+                    if (pinnedPos.TryGetValue(i, out float3 pinned))
+                        positions[i] = pinned;
                 }
             }
         }
