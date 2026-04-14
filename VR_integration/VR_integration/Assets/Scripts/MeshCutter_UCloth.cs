@@ -24,7 +24,7 @@ public class MeshCutter_UCloth
     // renderVertexIndex -> simNodeIndex
     private int[] _renderToSimLookup;
 
-    private const int MIN_TRIS_FOR_PIECE = 4;
+    private const int MIN_TRIS_FOR_PIECE =4;
 
     // Tích lũy triangle index đã bị cutter đi qua (dùng HashSet để không trùng lặp)
     private readonly HashSet<int> _accumulatedCutTris = new HashSet<int>();
