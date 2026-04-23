@@ -151,6 +151,26 @@ public class CuttingManager_UCloth : MonoBehaviour
                 foreach (var piece in newPieces)
                     toAdd.Add(piece);
 
+                // ── Log diện tích ─────────────────────────────────────────
+                var areaReport = cutter.GetLastAreaReport();
+                if (areaReport.HasValue)
+                {
+                    var r = areaReport.Value;
+                    Debug.Log($"[CuttingManager_UCloth] AREA REPORT cho {obj.name}:\n" +
+                              r.ToString());
+
+                    // Ghi diện tích vào component ClothAreaData (nếu có) trên piece
+                    for (int pi = 0; pi < newPieces.Count; pi++)
+                    {
+                        if (newPieces[pi] == null) continue;
+                        var data = newPieces[pi].AddComponent<ClothAreaData>();
+                        data.originalArea  = r.OriginalArea;
+                        data.pieceArea     = pi < r.PieceAreas.Length ? r.PieceAreas[pi] : 0f;
+                        data.seamArea      = r.SeamArea;
+                        data.seamRatio     = r.SeamRatio;
+                    }
+                }
+
                 obj.SetActive(false);
                 toRemove.Add(obj);
                 Debug.Log($"[CuttingManager_UCloth] ✓ {obj.name} đã tách.");

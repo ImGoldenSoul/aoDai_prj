@@ -32,6 +32,12 @@ public class MeshCutter_UCloth
     // Danh sách GameObject vừa được tạo trong lần Split gần nhất
     private readonly List<GameObject> _lastCreatedPieces = new List<GameObject>();
 
+    // Report diện tích của lần Split gần nhất (null nếu chưa từng split)
+    private ClothAreaCalculator.CutAreaReport? _lastAreaReport;
+
+    /// <summary>Trả về report diện tích của lần cắt gần nhất (null nếu chưa split).</summary>
+    public ClothAreaCalculator.CutAreaReport? GetLastAreaReport() => _lastAreaReport;
+
     public MeshCutter_UCloth(GameObject target, float splitForce)
     {
         _target     = target;
@@ -123,7 +129,13 @@ public class MeshCutter_UCloth
         if (!doSplit)
             return newThisFrame > 0 ? CutResult_Ucloth.Trimmed : CutResult_Ucloth.None;
 
-        // ── Bước 4: Xây dựng 2 mesh con ──────────────────────────────────────
+        // ── Bước 4: Tính diện tích trước khi tạo pieces ─────────────────────
+        //   worldVerts, tris, components còn nguyên vẹn nên tính ở đây là chính xác nhất.
+        _lastAreaReport = ClothAreaCalculator.BuildReport(
+            worldVerts, tris, components, _accumulatedCutTris);
+        Debug.Log(_lastAreaReport.Value.ToString());
+
+        // ── Bước 5: Xây dựng 2 mesh con ──────────────────────────────────────
 
         if (_ucCloth != null) _ucCloth.enabled = false;
 
