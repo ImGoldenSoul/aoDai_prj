@@ -12,6 +12,9 @@ using URandom = UnityEngine.Random;
 ///      chia thành >= 2 vùng liên thông chưa.
 ///   3. Khi đủ điều kiện split: nhân đôi seam vertex, xây dựng 2 mesh con sạch,
 ///      tạo 2 GameObject với UCCloth giữ nguyên tag.
+///
+/// v2 – Thêm PerformCutByRay(): phát hiện triangle bằng Ray thay vì Collider.
+///       PerformCut(Collider) vẫn được giữ lại để backward-compatible.
 /// </summary>
 public class MeshCutter_UCloth
 {
@@ -24,7 +27,7 @@ public class MeshCutter_UCloth
     // renderVertexIndex -> simNodeIndex
     private int[] _renderToSimLookup;
 
-    private const int MIN_TRIS_FOR_PIECE =4;
+    private const int MIN_TRIS_FOR_PIECE = 4;
 
     // Tích lũy triangle index đã bị cutter đi qua (dùng HashSet để không trùng lặp)
     private readonly HashSet<int> _accumulatedCutTris = new HashSet<int>();
@@ -62,7 +65,6 @@ public class MeshCutter_UCloth
     /// <summary>Gọi từ CuttingManager sau khi UCCloth đã init.</summary>
     public void Initialize()
     {
-        // Không cần tính threshold nữa vì không dùng centroid removal.
         Debug.Log($"[MeshCutter_UCloth] Initialized (Seam-Split mode).");
     }
 
@@ -70,7 +72,65 @@ public class MeshCutter_UCloth
     public List<GameObject> GetLastCreatedPieces() => new List<GameObject>(_lastCreatedPieces);
 
     // =========================================================================
-    //  ENTRY POINT
+    //  ENTRY POINT — Ray-based (v2, mặc định)
+    // =========================================================================
+
+    /// <summary>
+    /// Tìm các triangle giao với ống trụ bao quanh <paramref name="ray"/>
+    /// (bán kính <paramref name="radius"/>, chiều dài <paramref name="maxLength"/>)
+    /// rồi tích lũy và thực hiện split giống hệt PerformCut(Collider).
+    /// </summary>
+    public CutResult_Ucloth PerformCutByRay(Ray ray, float maxLength, float radius,
+                                             bool splitOnlyWhenDisconnected)
+    {
+        if (_mf == null) return CutResult_Ucloth.None;
+
+        Mesh      mesh    = _mf.mesh;
+        Vector3[] verts   = mesh.vertices;
+        int[]     tris    = mesh.triangles;
+        Vector2[] uv      = mesh.uv;
+        Vector3[] normals = mesh.normals;
+
+        if (verts.Length == 0 || tris.Length == 0) return CutResult_Ucloth.None;
+
+        bool hasUV    = uv      != null && uv.Length      == verts.Length;
+        bool hasNrm   = normals != null && normals.Length == verts.Length;
+        int  triCount = tris.Length / 3;
+
+        Vector3[] worldVerts = GetWorldSpaceVertices(verts);
+
+        // ── Bước 1: Tìm các triangle bị ray "quét" qua FRAME NÀY ────────────
+        //    Điều kiện: khoảng cách từ centroid hoặc ít nhất 1 đỉnh triangle
+        //               đến đường ray <= radius, VÀ điểm chiếu nằm trong [0, maxLength].
+
+        int newThisFrame = 0;
+        float radiusSqr  = radius * radius;
+
+        for (int t = 0; t < triCount; t++)
+        {
+            if (_accumulatedCutTris.Contains(t)) continue;
+
+            int     iA = tris[t * 3], iB = tris[t * 3 + 1], iC = tris[t * 3 + 2];
+            Vector3 wA = worldVerts[iA], wB = worldVerts[iB], wC = worldVerts[iC];
+
+            if (TriangleIntersectsRayCylinder(wA, wB, wC, ray, maxLength, radiusSqr))
+            {
+                _accumulatedCutTris.Add(t);
+                newThisFrame++;
+            }
+        }
+
+        if (newThisFrame == 0 && _accumulatedCutTris.Count == 0)
+            return CutResult_Ucloth.None;
+
+        // ── Bước 2-5: Giống hệt PerformCut(Collider) ─────────────────────────
+        return ExecuteSplitLogic(worldVerts, tris, normals, uv, verts,
+                                 hasNrm, hasUV, triCount,
+                                 newThisFrame, splitOnlyWhenDisconnected);
+    }
+
+    // =========================================================================
+    //  ENTRY POINT — Collider-based (giữ lại để backward-compatible)
     // =========================================================================
 
     public CutResult_Ucloth PerformCut(Collider cutter, bool splitOnlyWhenDisconnected)
@@ -91,14 +151,10 @@ public class MeshCutter_UCloth
 
         Vector3[] worldVerts = GetWorldSpaceVertices(verts);
 
-        // ── Bước 1: Tìm các triangle bị cutter chạm vào FRAME NÀY ────────────
-        //    Điều kiện: ít nhất 1 vertex nằm bên trong collider cutter,
-        //               HOẶC bất kỳ cạnh nào của triangle cắt qua collider.
-
         int newThisFrame = 0;
         for (int t = 0; t < triCount; t++)
         {
-            if (_accumulatedCutTris.Contains(t)) continue; // đã ghi nhận rồi
+            if (_accumulatedCutTris.Contains(t)) continue;
 
             int iA = tris[t*3], iB = tris[t*3+1], iC = tris[t*3+2];
             if (TriangleIntersectsCollider(worldVerts[iA], worldVerts[iB], worldVerts[iC], cutter))
@@ -111,8 +167,20 @@ public class MeshCutter_UCloth
         if (newThisFrame == 0 && _accumulatedCutTris.Count == 0)
             return CutResult_Ucloth.None;
 
-        // ── Bước 2: Dùng tổng triangle đã cắt làm "tường" flood-fill ─────────
+        return ExecuteSplitLogic(worldVerts, tris, normals, uv, verts,
+                                 hasNrm, hasUV, triCount,
+                                 newThisFrame, splitOnlyWhenDisconnected);
+    }
 
+    // =========================================================================
+    //  SHARED SPLIT LOGIC (dùng chung cho cả Ray và Collider path)
+    // =========================================================================
+
+    private CutResult_Ucloth ExecuteSplitLogic(
+        Vector3[] worldVerts, int[] tris, Vector3[] normals, Vector2[] uv, Vector3[] verts,
+        bool hasNrm, bool hasUV, int triCount,
+        int newThisFrame, bool splitOnlyWhenDisconnected)
+    {
         bool[] cutWall = new bool[triCount];
         foreach (int t in _accumulatedCutTris) cutWall[t] = true;
 
@@ -123,19 +191,13 @@ public class MeshCutter_UCloth
 
         if (components.Count == 0) return CutResult_Ucloth.None;
 
-        // ── Bước 3: Quyết định split hay chờ thêm ────────────────────────────
-
         bool doSplit = !splitOnlyWhenDisconnected || components.Count >= 2;
         if (!doSplit)
             return newThisFrame > 0 ? CutResult_Ucloth.Trimmed : CutResult_Ucloth.None;
 
-        // ── Bước 4: Tính diện tích trước khi tạo pieces ─────────────────────
-        //   worldVerts, tris, components còn nguyên vẹn nên tính ở đây là chính xác nhất.
         _lastAreaReport = ClothAreaCalculator.BuildReport(
             worldVerts, tris, components, _accumulatedCutTris);
         Debug.Log(_lastAreaReport.Value.ToString());
-
-        // ── Bước 5: Xây dựng 2 mesh con ──────────────────────────────────────
 
         if (_ucCloth != null) _ucCloth.enabled = false;
 
@@ -145,8 +207,8 @@ public class MeshCutter_UCloth
 
         for (int c = 0; c < components.Count; c++)
         {
-            var     compTris    = components[c];
-            Mesh    pieceMesh   = BuildMeshFromTris(compTris, tris, verts, normals, uv, hasNrm, hasUV);
+            var     compTris  = components[c];
+            Mesh    pieceMesh = BuildMeshFromTris(compTris, tris, verts, normals, uv, hasNrm, hasUV);
             if (pieceMesh == null) continue;
 
             Vector3 pieceCenter = ComputeCenterFromTriangles(compTris, tris, worldVerts);
@@ -202,15 +264,148 @@ public class MeshCutter_UCloth
     }
 
     // =========================================================================
-    //  Kiểm tra triangle giao với collider — KHÔNG dùng Physics API
-    //  (hoạt động cả khi kéo tay trong Scene view, không cần sync transform)
+    //  RAY-CYLINDER INTERSECTION TEST
+    // =========================================================================
+
+    /// <summary>
+    /// Trả về true nếu triangle (wA, wB, wC) giao với ống trụ xung quanh ray.
+    ///
+    /// Thuật toán:
+    ///   – Chiếu từng điểm (3 đỉnh + centroid) lên ray; nếu điểm chiếu nằm trong
+    ///     [0, maxLength] và khoảng cách vuông góc &lt;= radius → hit.
+    ///   – Kiểm tra thêm từng cạnh triangle giao với ống trụ bằng segment-cylinder test.
+    ///   – Kiểm tra ray có đâm xuyên mặt phẳng triangle không (ray-triangle intersect
+    ///     chuẩn Möller–Trumbore), nếu giao điểm trong tam giác và t ∈ [0, maxLength] → hit.
+    /// </summary>
+    private static bool TriangleIntersectsRayCylinder(
+        Vector3 wA, Vector3 wB, Vector3 wC,
+        Ray ray, float maxLength, float radiusSqr)
+    {
+        // 1. Kiểm tra từng đỉnh + centroid
+        Vector3 centroid = (wA + wB + wC) / 3f;
+        if (PointNearRay(wA,       ray, maxLength, radiusSqr)) return true;
+        if (PointNearRay(wB,       ray, maxLength, radiusSqr)) return true;
+        if (PointNearRay(wC,       ray, maxLength, radiusSqr)) return true;
+        if (PointNearRay(centroid, ray, maxLength, radiusSqr)) return true;
+
+        // 2. Kiểm tra từng cạnh
+        if (SegmentNearRay(wA, wB, ray, maxLength, radiusSqr)) return true;
+        if (SegmentNearRay(wB, wC, ray, maxLength, radiusSqr)) return true;
+        if (SegmentNearRay(wC, wA, ray, maxLength, radiusSqr)) return true;
+
+        // 3. Ray-triangle intersection (Möller–Trumbore)
+        return RayIntersectsTriangle(ray, maxLength, wA, wB, wC);
+    }
+
+    /// <summary>
+    /// Kiểm tra điểm P có nằm trong ống trụ bao quanh ray không.
+    /// Điều kiện: điểm chiếu t ∈ [0, maxLength] VÀ dist² < radiusSqr.
+    /// </summary>
+    private static bool PointNearRay(Vector3 p, Ray ray, float maxLength, float radiusSqr)
+    {
+        Vector3 d  = p - ray.origin;
+        float   t  = Vector3.Dot(d, ray.direction);
+        if (t < 0f || t > maxLength) return false;
+
+        Vector3 closest = ray.origin + ray.direction * t;
+        return (p - closest).sqrMagnitude <= radiusSqr;
+    }
+
+    /// <summary>
+    /// Khoảng cách nhỏ nhất giữa 2 đoạn thẳng (segment AB và ray) có &lt;= radius không?
+    /// Dùng thuật toán segment-segment distance.
+    /// </summary>
+    private static bool SegmentNearRay(Vector3 sA, Vector3 sB,
+                                        Ray ray, float maxLength, float radiusSqr)
+    {
+        // Ray là đoạn từ ray.origin đến ray.origin + ray.direction * maxLength
+        Vector3 rayEnd = ray.origin + ray.direction * maxLength;
+
+        Vector3 d1 = sB      - sA;
+        Vector3 d2 = rayEnd  - ray.origin;
+        Vector3 r  = sA      - ray.origin;
+
+        float a = Vector3.Dot(d1, d1);
+        float e = Vector3.Dot(d2, d2);
+        float f = Vector3.Dot(d2, r);
+
+        float s, t;
+
+        if (a <= 1e-8f && e <= 1e-8f)
+        {
+            // Cả hai đều là điểm
+            return r.sqrMagnitude <= radiusSqr;
+        }
+        if (a <= 1e-8f)
+        {
+            s = 0f;
+            t = Mathf.Clamp01(f / e);
+        }
+        else
+        {
+            float c = Vector3.Dot(d1, r);
+            if (e <= 1e-8f)
+            {
+                t = 0f;
+                s = Mathf.Clamp01(-c / a);
+            }
+            else
+            {
+                float b    = Vector3.Dot(d1, d2);
+                float denom = a * e - b * b;
+                if (Mathf.Abs(denom) > 1e-8f)
+                    s = Mathf.Clamp01((b * f - c * e) / denom);
+                else
+                    s = 0f;
+
+                t = (b * s + f) / e;
+                if (t < 0f) { t = 0f; s = Mathf.Clamp01(-c / a); }
+                else if (t > 1f) { t = 1f; s = Mathf.Clamp01((b - c) / a); }
+            }
+        }
+
+        Vector3 closest1 = sA      + d1 * s;
+        Vector3 closest2 = ray.origin + d2 * t;
+        return (closest1 - closest2).sqrMagnitude <= radiusSqr;
+    }
+
+    /// <summary>
+    /// Möller–Trumbore ray-triangle intersection.
+    /// Trả về true nếu ray đâm vào tam giác tại t ∈ [0, maxLength].
+    /// </summary>
+    private static bool RayIntersectsTriangle(Ray ray, float maxLength,
+                                               Vector3 v0, Vector3 v1, Vector3 v2)
+    {
+        const float EPSILON = 1e-8f;
+
+        Vector3 edge1 = v1 - v0;
+        Vector3 edge2 = v2 - v0;
+        Vector3 h     = Vector3.Cross(ray.direction, edge2);
+        float   a     = Vector3.Dot(edge1, h);
+
+        if (a > -EPSILON && a < EPSILON) return false; // Ray song song mặt phẳng
+
+        float   f = 1f / a;
+        Vector3 s = ray.origin - v0;
+        float   u = f * Vector3.Dot(s, h);
+        if (u < 0f || u > 1f) return false;
+
+        Vector3 q = Vector3.Cross(s, edge1);
+        float   v = f * Vector3.Dot(ray.direction, q);
+        if (v < 0f || u + v > 1f) return false;
+
+        float t = f * Vector3.Dot(edge2, q);
+        return t >= 0f && t <= maxLength;
+    }
+
+    // =========================================================================
+    //  COLLIDER INTERSECTION TEST (giữ lại cho PerformCut(Collider))
     // =========================================================================
 
     private bool TriangleIntersectsCollider(Vector3 wA, Vector3 wB, Vector3 wC, Collider col)
     {
         if (col is BoxCollider bc)
         {
-            // Chuyển 3 đỉnh về local space của box rồi test OBB
             Transform t   = bc.transform;
             Vector3   ext = bc.size * 0.5f;
             Vector3   ctr = bc.center;
@@ -219,17 +414,14 @@ public class MeshCutter_UCloth
             Vector3 lB = t.InverseTransformPoint(wB) - ctr;
             Vector3 lC = t.InverseTransformPoint(wC) - ctr;
 
-            // Kiểm tra từng đỉnh nằm trong box
             if (PointInBox(lA, ext)) return true;
             if (PointInBox(lB, ext)) return true;
             if (PointInBox(lC, ext)) return true;
 
-            // Kiểm tra các cạnh triangle cắt qua box (segment-AABB Slab test)
             if (SegmentIntersectsAABB(lA, lB, ext)) return true;
             if (SegmentIntersectsAABB(lB, lC, ext)) return true;
             if (SegmentIntersectsAABB(lC, lA, ext)) return true;
 
-            // Kiểm tra tâm triangle
             Vector3 lCen = (lA + lB + lC) / 3f;
             if (PointInBox(lCen, ext)) return true;
 
@@ -248,7 +440,6 @@ public class MeshCutter_UCloth
             return d2 <= wRadius * wRadius;
         }
 
-        // Fallback cho collider loại khác: dùng ClosestPoint với tolerance
         float tol = 0.001f;
         if (Vector3.SqrMagnitude(col.ClosestPoint(wA) - wA) < tol * tol) return true;
         if (Vector3.SqrMagnitude(col.ClosestPoint(wB) - wB) < tol * tol) return true;
@@ -256,11 +447,9 @@ public class MeshCutter_UCloth
         return false;
     }
 
-    // Điểm có nằm trong AABB [-ext, +ext] không?
     private static bool PointInBox(Vector3 p, Vector3 ext)
         => Mathf.Abs(p.x) <= ext.x && Mathf.Abs(p.y) <= ext.y && Mathf.Abs(p.z) <= ext.z;
 
-    // Segment AB cắt AABB [-ext,+ext]? — Slab method
     private static bool SegmentIntersectsAABB(Vector3 a, Vector3 b, Vector3 ext)
     {
         Vector3 d    = b - a;
@@ -289,7 +478,6 @@ public class MeshCutter_UCloth
         return true;
     }
 
-    // Khoảng cách bình phương từ điểm P đến tam giác ABC
     private static float PointToTriangleSqDist(Vector3 p, Vector3 a, Vector3 b, Vector3 c)
     {
         Vector3 ab = b-a, ac = c-a, ap = p-a;
@@ -338,7 +526,6 @@ public class MeshCutter_UCloth
         piece.transform.SetPositionAndRotation(_tf.position, _tf.rotation);
         piece.transform.localScale = _tf.lossyScale;
 
-        // Tag giống original
         piece.tag = _target.tag;
 
         piece.AddComponent<MeshFilter>().mesh = mesh;
@@ -361,21 +548,16 @@ public class MeshCutter_UCloth
             newCloth.capsuleColliders = _ucCloth.capsuleColliders;
             newCloth.cubeColliders    = _ucCloth.cubeColliders;
 
-            // Copy pinColliders từ original
             newCloth.pinColliders = new System.Collections.Generic.List<Collider>(_ucCloth.pinColliders);
 
-            // MeshCollider để va chạm vật lý (convex bắt buộc khi dùng với Rigidbody)
             var mc = piece.AddComponent<MeshCollider>();
             mc.sharedMesh = mesh;
             mc.convex     = true;
 
-            // Rigidbody: gravity bật, KHÔNG kinematic → piece rơi tự do
             var rb = piece.AddComponent<Rigidbody>();
             rb.useGravity  = true;
             rb.isKinematic = true;
 
-            // ── Sao chép UClothLaserGrabber sang mảnh mới ──────────────────
-            // Thiếu bước này khiến các mảnh sau khi cắt không thể tương tác được.
             var originalGrabber = _target.GetComponent<UClothLaserGrabber>();
             if (originalGrabber != null)
             {
@@ -486,11 +668,6 @@ public class MeshCutter_UCloth
         return adj;
     }
 
-    /// <summary>
-    /// Flood-fill nhưng KHÔNG đi qua các triangle bị loại trừ (excluded).
-    /// Khác FindConnectedComponents cũ: không loại excluded khỏi kết quả —
-    /// thay vào đó dùng excluded làm TƯỜNG ngăn giữa các component.
-    /// </summary>
     private List<List<int>> FindConnectedComponentsExcluding(
         int triCount, bool[] excluded, List<List<int>> adj)
     {
