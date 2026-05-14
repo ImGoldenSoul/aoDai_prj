@@ -6,26 +6,15 @@ using UnityEngine;
 /// CuttingManager tự động tìm tất cả GameObject có tag 'cloth' làm target.
 /// Khi cắt thành công, các mảnh được tạo ra vẫn có UCCloth + tag 'cloth'.
 ///
-/// v2 – Ray-based detection:
-///   Thay vì dùng Collider của cutter, Manager bắn một Ray từ transform của
-///   cutter (origin = position, direction = forward) và tìm các triangle mesh
-///   nằm trong bán kính <rayRadius> xung quanh đường ray để tích lũy vết cắt.
+/// v3 – Collider-based detection:
+///   Dùng Collider gắn trên cutter để xác định triangle bị cắt thay vì Ray.
+///   Yêu cầu cutter phải có ít nhất một Collider (IsTrigger hay không đều được).
 /// </summary>
 public class CuttingManager_UCloth : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("GameObject của cutter – Ray bắn từ vị trí này theo hướng forward của nó.")]
+    [Tooltip("GameObject của cutter – phải có Collider để phát hiện vùng cắt.")]
     public GameObject cutter;
-
-    [Header("Ray Settings")]
-    [Tooltip("Chiều dài tối đa của ray cắt (m).")]
-    public float rayLength = 5f;
-
-    [Tooltip("Bán kính ống (cylinder) bao quanh ray để xác định triangle bị cắt (m).")]
-    public float rayRadius = 0.02f;
-
-    [Tooltip("Hiển thị ray debug trong Scene view.")]
-    public bool showDebugRay = true;
 
     [Header("Settings")]
     [Tooltip("Số frame giữa 2 lần check cắt")]
@@ -42,6 +31,7 @@ public class CuttingManager_UCloth : MonoBehaviour
 
     // ── private ──────────────────────────────────────────────────────────────
     private int _frameCount;
+    private Collider _cutterCollider;
 
     // Map: target GameObject → cutter instance của nó
     private Dictionary<GameObject, MeshCutter_UCloth> _cutters
@@ -56,14 +46,16 @@ public class CuttingManager_UCloth : MonoBehaviour
             return;
         }
 
+        _cutterCollider = cutter.GetComponent<Collider>();
+        if (_cutterCollider == null)
+        {
+            Debug.LogError("[CuttingManager_UCloth] Cutter không có Collider!");
+            enabled = false;
+            return;
+        }
+
         RegisterAllClothObjects();
     }
-
-    // ── Helpers: lấy Ray từ cutter ───────────────────────────────────────────
-
-    /// <summary>Tạo Ray từ transform của cutter.</summary>
-    private Ray GetCutterRay()
-        => new Ray(cutter.transform.position, cutter.transform.forward);
 
     // ── Registration ─────────────────────────────────────────────────────────
 
@@ -126,15 +118,15 @@ public class CuttingManager_UCloth : MonoBehaviour
         _frameCount++;
         if (_frameCount % checkInterval != 0) return;
 
-        Ray cutRay = GetCutterRay();
+        if (_cutterCollider == null) return;
 
         var toRemove = new List<GameObject>();
         var toAdd    = new List<GameObject>();
 
         foreach (var kv in _cutters)
         {
-            GameObject obj    = kv.Key;
-            var        mc     = kv.Value;
+            GameObject obj = kv.Key;
+            var        mc  = kv.Value;
 
             if (obj == null || !obj.activeSelf)
             {
@@ -144,12 +136,12 @@ public class CuttingManager_UCloth : MonoBehaviour
 
             if (mc == null) continue;
 
-            // ── Cheap bounds check: kiểm tra ray có đi gần bounds không ────
+            // ── Cheap bounds check: kiểm tra collider có giao với bounds không ──
             var renderer = obj.GetComponent<Renderer>();
-            if (renderer != null && !RayPassesNearBounds(cutRay, renderer.bounds, rayRadius + 0.1f))
+            if (renderer != null && !CollidersOverlapBounds(_cutterCollider, renderer.bounds))
                 continue;
 
-            var result = mc.PerformCutByRay(cutRay, rayLength, rayRadius, splitOnlyWhenDisconnected);
+            var result = mc.PerformCut(_cutterCollider, splitOnlyWhenDisconnected);
 
             if (result == CutResult_Ucloth.Split)
             {
@@ -198,32 +190,24 @@ public class CuttingManager_UCloth : MonoBehaviour
     // ── Geometry helpers ─────────────────────────────────────────────────────
 
     /// <summary>
-    /// Kiểm tra nhanh: Ray có đi gần AABB bounds trong khoảng maxDist không?
-    /// Dùng để early-out trước khi thử từng triangle.
+    /// Kiểm tra nhanh: AABB của collider cutter có overlap với bounds của cloth không.
+    /// Dùng để early-out trước khi kiểm tra từng triangle.
     /// </summary>
-    private static bool RayPassesNearBounds(Ray ray, Bounds bounds, float maxDist)
+    private static bool CollidersOverlapBounds(Collider cutterCol, Bounds clothBounds)
     {
-        // Mở rộng bounds theo maxDist rồi test ray thông thường
-        var expanded = bounds;
-        expanded.Expand(maxDist * 2f);
-        return expanded.IntersectRay(ray);
+        return cutterCol.bounds.Intersects(clothBounds);
     }
 
     // ── Gizmos ───────────────────────────────────────────────────────────────
 
     void OnDrawGizmos()
     {
-        if (cutter == null || !showDebugRay) return;
+        if (cutter == null) return;
 
-        Ray ray = new Ray(cutter.transform.position, cutter.transform.forward);
+        var col = cutter.GetComponent<Collider>();
+        if (col == null) return;
 
-        // Đường ray chính
-        Gizmos.color = new Color(1f, 0.3f, 0f, 0.9f);
-        Gizmos.DrawRay(ray.origin, ray.direction * rayLength);
-
-        // Hình trụ biểu thị bán kính ảnh hưởng (vẽ bằng sphere ở 2 đầu)
-        Gizmos.color = new Color(1f, 0.6f, 0f, 0.25f);
-        Gizmos.DrawSphere(ray.origin, rayRadius);
-        Gizmos.DrawSphere(ray.origin + ray.direction * rayLength, rayRadius);
+        Gizmos.color = new Color(1f, 0.3f, 0f, 0.4f);
+        Gizmos.DrawWireCube(col.bounds.center, col.bounds.size);
     }
 }
