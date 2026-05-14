@@ -928,6 +928,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &61345498
 MeshCollider:
@@ -1854,7 +1857,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!114 &176587058
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -2301,7 +2304,7 @@ Transform:
   m_GameObject: {fileID: 218213002}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 9.754, y: 1.087332, z: 10.86}
+  m_LocalPosition: {x: 9.754, y: -5.73, z: 10.86}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -4758,6 +4761,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!114 &347939346
 MonoBehaviour:
@@ -4811,6 +4817,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 151961090}
+  rightGrabSphere: {fileID: 1711091095}
+  rightTriggerAction: {fileID: 187161793506945269, guid: c348712bda248c246b8c49b3db54643f, type: 3}
   pullForce: 50
 --- !u!114 &357928183
 MonoBehaviour:
@@ -5276,6 +5285,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &431690622
 MeshCollider:
@@ -6134,6 +6146,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &531240813
 MeshCollider:
@@ -6943,6 +6958,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!114 &590167138
 MonoBehaviour:
@@ -10841,6 +10859,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &955812944
 MeshCollider:
@@ -11150,7 +11171,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 988436595}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: 01f69dc1cb084aa42b2f2f8cd87bc770, type: 3}
   m_Name: 
@@ -12295,7 +12316,7 @@ Transform:
   m_GameObject: {fileID: 1072188314}
   serializedVersion: 2
   m_LocalRotation: {x: -0.4855571, y: 0.48555705, z: -0.5140372, w: 0.5140373}
-  m_LocalPosition: {x: -0.3892, y: 0.0156, z: 0.1633}
+  m_LocalPosition: {x: -0.411, y: 0.016, z: 0.162}
   m_LocalScale: {x: 0.33582962, y: 0.33582982, z: 0.33582962}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -14427,7 +14448,7 @@ GameObject:
   m_Icon: {fileID: 0}
   m_NavMeshLayer: 0
   m_StaticEditorFlags: 0
-  m_IsActive: 1
+  m_IsActive: 0
 --- !u!4 &1257713637
 Transform:
   m_ObjectHideFlags: 0
@@ -15798,6 +15819,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &1420178923
 MeshCollider:
@@ -15989,6 +16013,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &1424082674
 MeshCollider:
@@ -16885,6 +16912,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!114 &1517023229
 MonoBehaviour:
@@ -18542,7 +18572,7 @@ Transform:
   m_GameObject: {fileID: 1643557198}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 6.91, y: 1.2, z: 11.24}
+  m_LocalPosition: {x: 7.72, y: 1.2, z: 10.79}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children: []
@@ -18573,7 +18603,7 @@ Transform:
   m_GameObject: {fileID: 1647336474}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: 0, y: 0, z: 0}
+  m_LocalPosition: {x: -2.3, y: 0, z: 0.092}
   m_LocalScale: {x: 1, y: 1, z: 1}
   m_ConstrainProportionsScale: 0
   m_Children:
@@ -20140,6 +20170,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &1740768640
 MeshCollider:
@@ -20474,9 +20507,9 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 29cbbd8c5bac27148994fc4c9aa1a133, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  fabricPrefab: {fileID: 145032638964716923, guid: f5246ff604b0bdb45b01fd52a88c0a85, type: 3}
+  fabricPrefab: {fileID: 1647336474}
   spawnPoint: {fileID: 1643557199}
-  spawnOffset: {x: 1, y: 0, z: 0}
+  spawnOffset: {x: 0.95, y: 0, z: 0}
   spawnedFabrics: []
   containerTag: FabricContainer
   cuttingManager: {fileID: 1601137263}
@@ -20511,8 +20544,8 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: b5deb01abb94b224cb9af68cf9daa204, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  cutTool: {fileID: 176587058}
-  sewTool: {fileID: 1257713638}
+  cutTool: {fileID: 3147199119977476609}
+  sewTool: {fileID: 7774260917732993906}
   targetHandInteractor: {fileID: 2104264996}
 --- !u!1 &1826683987
 GameObject:
@@ -22663,6 +22696,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &2013056090
 MeshCollider:
@@ -23213,6 +23249,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   leftHandController: {fileID: 2104264989}
   grabSphereTarget: {fileID: 1711091095}
+  environmentColliders: []
 --- !u!1 &2104264988
 GameObject:
   m_ObjectHideFlags: 0
@@ -24028,7 +24065,7 @@ GameObject:
   - component: {fileID: 885502294336800055}
   - component: {fileID: 3147199119977476607}
   - component: {fileID: 3147199119977476609}
-  - component: {fileID: 3147199119977476610}
+  - component: {fileID: 3147199119977476611}
   m_Layer: 0
   m_Name: Cutter
   m_TagString: Untagged
@@ -24360,8 +24397,8 @@ MonoBehaviour:
   m_StartingSingleGrabTransformers: []
   m_StartingMultipleGrabTransformers: []
   m_AddDefaultGrabTransformers: 1
---- !u!64 &3147199119977476610
-MeshCollider:
+--- !u!65 &3147199119977476611
+BoxCollider:
   m_ObjectHideFlags: 0
   m_CorrespondingSourceObject: {fileID: 0}
   m_PrefabInstance: {fileID: 0}
@@ -24378,10 +24415,9 @@ MeshCollider:
   m_IsTrigger: 0
   m_ProvidesContacts: 0
   m_Enabled: 1
-  serializedVersion: 5
-  m_Convex: 1
-  m_CookingOptions: 30
-  m_Mesh: {fileID: 4787136918717088048, guid: 72d2a99965cb8ab48b2a114aae174c33, type: 3}
+  serializedVersion: 3
+  m_Size: {x: 0.1, y: 0.01, z: 0.04}
+  m_Center: {x: -0.3356, y: 0.0042283083, z: 0.178}
 --- !u!1 &3498712741451294455
 GameObject:
   m_ObjectHideFlags: 0
@@ -24476,6 +24512,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &3559572907910517915
 MeshCollider:
@@ -24588,6 +24627,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &3686011070416400607
 MeshCollider:
@@ -24707,6 +24749,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &4307196197869075536
 MeshCollider:
@@ -24819,6 +24864,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &4530745244675621787
 MeshCollider:
@@ -25264,8 +25312,8 @@ BoxCollider:
   m_ProvidesContacts: 0
   m_Enabled: 1
   serializedVersion: 3
-  m_Size: {x: 0.010455358, y: 0.107771814, z: 0.0083697075}
-  m_Center: {x: -0.000000029802322, y: 0.044214316, z: -0.0008802273}
+  m_Size: {x: 0.005, y: 0.08, z: 0.01}
+  m_Center: {x: -0.000000029802322, y: 0.03, z: -0.0008802273}
 --- !u!33 &8463053724957569662
 MeshFilter:
   m_ObjectHideFlags: 0
@@ -25304,6 +25352,9 @@ MonoBehaviour:
   vrController: {fileID: 2104264989}
   grabSphere: {fileID: 1711091095}
   triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 0}
+  rightGrabSphere: {fileID: 0}
+  rightTriggerAction: {fileID: 0}
   pullForce: 50
 --- !u!64 &8463053724957569665
 MeshCollider:
