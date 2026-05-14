@@ -9,6 +9,13 @@ using UnityEngine;
 /// v3 – Collider-based detection:
 ///   Dùng Collider gắn trên cutter để xác định triangle bị cắt thay vì Ray.
 ///   Yêu cầu cutter phải có ít nhất một Collider (IsTrigger hay không đều được).
+///
+/// v4 – FIX:
+///   [Bug #3] Bounds check không dùng renderer.bounds khi object có UCCloth,
+///            vì UCCloth simulate bằng Jobs/GPU — renderer.bounds chỉ phản ánh
+///            mesh gốc, không phải vị trí thực tế của cloth đang bay/rơi.
+///            → Với UCCloth object: bỏ qua bounds check (luôn tiến hành kiểm tra triangle).
+///            → Với non-UCCloth object: giữ nguyên bounds check như cũ.
 /// </summary>
 public class CuttingManager_UCloth : MonoBehaviour
 {
@@ -36,6 +43,9 @@ public class CuttingManager_UCloth : MonoBehaviour
     // Map: target GameObject → cutter instance của nó
     private Dictionary<GameObject, MeshCutter_UCloth> _cutters
         = new Dictionary<GameObject, MeshCutter_UCloth>();
+
+    // Cache: object nào có UCCloth (để bỏ qua bounds check cho chúng)
+    private HashSet<GameObject> _ucClothObjects = new HashSet<GameObject>();
 
     void Start()
     {
@@ -74,6 +84,11 @@ public class CuttingManager_UCloth : MonoBehaviour
         if (obj.GetComponent<MeshFilter>() == null) return;
 
         _cutters[obj] = null;
+
+        // Cache xem object này có UCCloth không, để xử lý bounds check đúng
+        if (obj.GetComponent<UCloth.UCCloth>() != null)
+            _ucClothObjects.Add(obj);
+
         StartCoroutine(InitCutterForObject(obj));
     }
 
@@ -82,6 +97,16 @@ public class CuttingManager_UCloth : MonoBehaviour
         var ucCloth = obj.GetComponent<UCloth.UCCloth>();
         if (ucCloth != null)
         {
+            // Sanitize collider arrays TRƯỚC KHI UCCloth.Start() chạy.
+            // Nếu các array này null (chưa assign trong Inspector), UCCloth.FilterColliders()
+            // sẽ crash ngay lập tức. Gán empty array để tránh lỗi.
+            // Lưu ý: MeshCutter_UCloth.CreatePiece() sẽ copy đầy đủ các collider arrays
+            // từ object gốc sang piece sau khi cắt — không cần assign lại thủ công.
+            if (ucCloth.sphereColliders  == null) ucCloth.sphereColliders  = new SphereCollider[0];
+            if (ucCloth.capsuleColliders == null) ucCloth.capsuleColliders = new CapsuleCollider[0];
+            if (ucCloth.cubeColliders    == null) ucCloth.cubeColliders    = new BoxCollider[0];
+            if (ucCloth.pinColliders     == null) ucCloth.pinColliders     = new System.Collections.Generic.List<Collider>();
+
             float timeout = 5f;
             while (timeout > 0f)
             {
@@ -100,12 +125,14 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         if (obj == null) yield break;
 
+        // Constructor KHÔNG build lookup nữa (FIX Bug #1 & #2 trong MeshCutter_UCloth).
         var meshCutter = new MeshCutter_UCloth(obj, splitForce);
 
         yield return new WaitForEndOfFrame();
 
         if (obj == null) yield break;
 
+        // Initialize() bây giờ mới build _renderToSimLookup vì simData đã sẵn sàng.
         meshCutter.Initialize();
         _cutters[obj] = meshCutter;
         Debug.Log($"[CuttingManager_UCloth] ✓ Sẵn sàng cắt: {obj.name}");
@@ -136,10 +163,19 @@ public class CuttingManager_UCloth : MonoBehaviour
 
             if (mc == null) continue;
 
-            // ── Cheap bounds check: kiểm tra collider có giao với bounds không ──
-            var renderer = obj.GetComponent<Renderer>();
-            if (renderer != null && !CollidersOverlapBounds(_cutterCollider, renderer.bounds))
-                continue;
+            // ── Bounds check ────────────────────────────────────────────────
+            // FIX Bug #3:
+            //   UCCloth simulate bằng Jobs/GPU. renderer.bounds phản ánh mesh gốc
+            //   (T-pose / rest pose), KHÔNG phải vị trí thực khi cloth đang bay.
+            //   → Bỏ qua bounds check cho UCCloth objects để tránh early-out sai.
+            //   → Với non-UCCloth objects: giữ nguyên bounds check để tối ưu hiệu năng.
+            bool hasUCCloth = _ucClothObjects.Contains(obj);
+            if (!hasUCCloth)
+            {
+                var renderer = obj.GetComponent<Renderer>();
+                if (renderer != null && !CollidersOverlapBounds(_cutterCollider, renderer.bounds))
+                    continue;
+            }
 
             var result = mc.PerformCut(_cutterCollider, splitOnlyWhenDisconnected);
 
@@ -183,15 +219,19 @@ public class CuttingManager_UCloth : MonoBehaviour
             }
         }
 
-        foreach (var obj in toRemove) _cutters.Remove(obj);
-        foreach (var obj in toAdd)    RegisterClothObject(obj);
+        foreach (var obj in toRemove)
+        {
+            _cutters.Remove(obj);
+            _ucClothObjects.Remove(obj);
+        }
+        foreach (var obj in toAdd) RegisterClothObject(obj);
     }
 
     // ── Geometry helpers ─────────────────────────────────────────────────────
 
     /// <summary>
     /// Kiểm tra nhanh: AABB của collider cutter có overlap với bounds của cloth không.
-    /// Dùng để early-out trước khi kiểm tra từng triangle.
+    /// Chỉ dùng cho non-UCCloth objects (xem FIX Bug #3 ở LateUpdate).
     /// </summary>
     private static bool CollidersOverlapBounds(Collider cutterCol, Bounds clothBounds)
     {

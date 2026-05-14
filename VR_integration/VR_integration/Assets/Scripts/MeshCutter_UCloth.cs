@@ -15,6 +15,11 @@ using URandom = UnityEngine.Random;
 ///
 /// v2 – Thêm PerformCutByRay(): phát hiện triangle bằng Ray thay vì Collider.
 ///       PerformCut(Collider) vẫn được giữ lại để backward-compatible.
+///
+/// v3 – FIX:
+///   [Bug #1 & #2] Constructor KHÔNG gọi BuildRenderToSimLookup() sớm (simData chưa sẵn sàng).
+///                 Initialize() mới là nơi build lookup, sau khi CuttingManager chờ simData xong.
+///   [Bug #4]      MeshCollider trên piece dùng convex=false (cloth mesh là non-convex / phẳng).
 /// </summary>
 public class MeshCutter_UCloth
 {
@@ -25,6 +30,7 @@ public class MeshCutter_UCloth
     private readonly UCloth.UCCloth _ucCloth;
 
     // renderVertexIndex -> simNodeIndex
+    // Được build trong Initialize() SAU KHI simData sẵn sàng, KHÔNG phải trong constructor.
     private int[] _renderToSimLookup;
 
     private const int MIN_TRIS_FOR_PIECE = 4;
@@ -41,6 +47,12 @@ public class MeshCutter_UCloth
     /// <summary>Trả về report diện tích của lần cắt gần nhất (null nếu chưa split).</summary>
     public ClothAreaCalculator.CutAreaReport? GetLastAreaReport() => _lastAreaReport;
 
+    // =========================================================================
+    //  CONSTRUCTOR
+    //  FIX Bug #1 & #2: KHÔNG gọi BuildRenderToSimLookup() ở đây.
+    //  simData của UCCloth chưa sẵn sàng tại thời điểm constructor chạy
+    //  (UCCloth.Start() chưa hoàn thành). Lookup sẽ được build trong Initialize().
+    // =========================================================================
     public MeshCutter_UCloth(GameObject target, float splitForce)
     {
         _target     = target;
@@ -51,21 +63,48 @@ public class MeshCutter_UCloth
 
         if (_ucCloth != null)
         {
-            BuildRenderToSimLookup();
-            int simCount = (_ucCloth.simData?.positionsReadOnly.IsCreated == true)
-                ? _ucCloth.simData.positionsReadOnly.Length : 0;
-            Debug.Log($"[MeshCutter_UCloth] UCCloth detected. Verts:{_mf.mesh.vertexCount} SimNodes:{simCount}");
+            // KHÔNG gọi BuildRenderToSimLookup() ở đây — simData chưa có.
+            // Initialize() sẽ được CuttingManager gọi sau khi chờ simData xong.
+            Debug.Log($"[MeshCutter_UCloth] UCCloth detected trên '{target.name}'. " +
+                      $"Verts:{_mf.mesh.vertexCount} — chờ Initialize() để build lookup.");
         }
         else
         {
-            Debug.Log("[MeshCutter_UCloth] No UCCloth — using TransformPoint.");
+            Debug.Log($"[MeshCutter_UCloth] No UCCloth trên '{target.name}' — sẽ dùng TransformPoint.");
         }
     }
 
-    /// <summary>Gọi từ CuttingManager sau khi UCCloth đã init.</summary>
+    // =========================================================================
+    //  INITIALIZE
+    //  FIX Bug #1 & #2: Build _renderToSimLookup TẠI ĐÂY, sau khi CuttingManager
+    //  đã chờ UCCloth.simData sẵn sàng (coroutine InitCutterForObject).
+    // =========================================================================
+    /// <summary>
+    /// Gọi từ CuttingManager SAU KHI UCCloth.simData đã được khởi tạo.
+    /// Build render→sim vertex lookup để GetWorldSpaceVertices() hoạt động đúng.
+    /// </summary>
     public void Initialize()
     {
-        Debug.Log($"[MeshCutter_UCloth] Initialized (Seam-Split mode).");
+        if (_ucCloth != null)
+        {
+            BuildRenderToSimLookup();
+
+            bool lookupReady = _renderToSimLookup != null;
+            int  simCount    = (_ucCloth.simData?.positionsReadOnly.IsCreated == true)
+                               ? _ucCloth.simData.positionsReadOnly.Length : 0;
+
+            Debug.Log($"[MeshCutter_UCloth] Initialized '{_target.name}' (Seam-Split mode). " +
+                      $"Lookup built: {(lookupReady ? "YES" : "NO — simData chưa sẵn sàng!")} | " +
+                      $"Verts:{_mf.mesh.vertexCount} SimNodes:{simCount}");
+
+            if (!lookupReady)
+                Debug.LogWarning($"[MeshCutter_UCloth] '{_target.name}': _renderToSimLookup = null sau Initialize(). " +
+                                 "Sẽ fallback TransformPoint — vị trí đỉnh có thể sai khi cloth simulate.");
+        }
+        else
+        {
+            Debug.Log($"[MeshCutter_UCloth] Initialized '{_target.name}' (no UCCloth — TransformPoint mode).");
+        }
     }
 
     /// <summary>Trả về danh sách piece GameObject tạo ra từ lần Split gần nhất.</summary>
@@ -100,9 +139,6 @@ public class MeshCutter_UCloth
         Vector3[] worldVerts = GetWorldSpaceVertices(verts);
 
         // ── Bước 1: Tìm các triangle bị ray "quét" qua FRAME NÀY ────────────
-        //    Điều kiện: khoảng cách từ centroid hoặc ít nhất 1 đỉnh triangle
-        //               đến đường ray <= radius, VÀ điểm chiếu nằm trong [0, maxLength].
-
         int newThisFrame = 0;
         float radiusSqr  = radius * radius;
 
@@ -269,13 +305,6 @@ public class MeshCutter_UCloth
 
     /// <summary>
     /// Trả về true nếu triangle (wA, wB, wC) giao với ống trụ xung quanh ray.
-    ///
-    /// Thuật toán:
-    ///   – Chiếu từng điểm (3 đỉnh + centroid) lên ray; nếu điểm chiếu nằm trong
-    ///     [0, maxLength] và khoảng cách vuông góc &lt;= radius → hit.
-    ///   – Kiểm tra thêm từng cạnh triangle giao với ống trụ bằng segment-cylinder test.
-    ///   – Kiểm tra ray có đâm xuyên mặt phẳng triangle không (ray-triangle intersect
-    ///     chuẩn Möller–Trumbore), nếu giao điểm trong tam giác và t ∈ [0, maxLength] → hit.
     /// </summary>
     private static bool TriangleIntersectsRayCylinder(
         Vector3 wA, Vector3 wB, Vector3 wC,
@@ -297,10 +326,6 @@ public class MeshCutter_UCloth
         return RayIntersectsTriangle(ray, maxLength, wA, wB, wC);
     }
 
-    /// <summary>
-    /// Kiểm tra điểm P có nằm trong ống trụ bao quanh ray không.
-    /// Điều kiện: điểm chiếu t ∈ [0, maxLength] VÀ dist² < radiusSqr.
-    /// </summary>
     private static bool PointNearRay(Vector3 p, Ray ray, float maxLength, float radiusSqr)
     {
         Vector3 d  = p - ray.origin;
@@ -311,14 +336,9 @@ public class MeshCutter_UCloth
         return (p - closest).sqrMagnitude <= radiusSqr;
     }
 
-    /// <summary>
-    /// Khoảng cách nhỏ nhất giữa 2 đoạn thẳng (segment AB và ray) có &lt;= radius không?
-    /// Dùng thuật toán segment-segment distance.
-    /// </summary>
     private static bool SegmentNearRay(Vector3 sA, Vector3 sB,
                                         Ray ray, float maxLength, float radiusSqr)
     {
-        // Ray là đoạn từ ray.origin đến ray.origin + ray.direction * maxLength
         Vector3 rayEnd = ray.origin + ray.direction * maxLength;
 
         Vector3 d1 = sB      - sA;
@@ -333,7 +353,6 @@ public class MeshCutter_UCloth
 
         if (a <= 1e-8f && e <= 1e-8f)
         {
-            // Cả hai đều là điểm
             return r.sqrMagnitude <= radiusSqr;
         }
         if (a <= 1e-8f)
@@ -364,15 +383,11 @@ public class MeshCutter_UCloth
             }
         }
 
-        Vector3 closest1 = sA      + d1 * s;
+        Vector3 closest1 = sA        + d1 * s;
         Vector3 closest2 = ray.origin + d2 * t;
         return (closest1 - closest2).sqrMagnitude <= radiusSqr;
     }
 
-    /// <summary>
-    /// Möller–Trumbore ray-triangle intersection.
-    /// Trả về true nếu ray đâm vào tam giác tại t ∈ [0, maxLength].
-    /// </summary>
     private static bool RayIntersectsTriangle(Ray ray, float maxLength,
                                                Vector3 v0, Vector3 v1, Vector3 v2)
     {
@@ -383,7 +398,7 @@ public class MeshCutter_UCloth
         Vector3 h     = Vector3.Cross(ray.direction, edge2);
         float   a     = Vector3.Dot(edge1, h);
 
-        if (a > -EPSILON && a < EPSILON) return false; // Ray song song mặt phẳng
+        if (a > -EPSILON && a < EPSILON) return false;
 
         float   f = 1f / a;
         Vector3 s = ray.origin - v0;
@@ -544,15 +559,33 @@ public class MeshCutter_UCloth
             newCloth.offsetFront          = _ucCloth.offsetFront;
             newCloth.smoothing            = _ucCloth.smoothing;
 
-            newCloth.sphereColliders  = _ucCloth.sphereColliders;
-            newCloth.capsuleColliders = _ucCloth.capsuleColliders;
-            newCloth.cubeColliders    = _ucCloth.cubeColliders;
+            // Copy toàn bộ collider arrays từ original UCCloth sang piece.
+            // Dùng null-safe copy: nếu original null/empty thì gán empty array để
+            // UCCloth.FilterColliders() không crash, đồng thời vẫn giữ nguyên reference
+            // khi original có collider thực sự.
+            newCloth.sphereColliders = (_ucCloth.sphereColliders != null && _ucCloth.sphereColliders.Length > 0)
+                ? (SphereCollider[])_ucCloth.sphereColliders.Clone()
+                : new SphereCollider[0];
 
-            newCloth.pinColliders = new System.Collections.Generic.List<Collider>(_ucCloth.pinColliders);
+            newCloth.capsuleColliders = (_ucCloth.capsuleColliders != null && _ucCloth.capsuleColliders.Length > 0)
+                ? (CapsuleCollider[])_ucCloth.capsuleColliders.Clone()
+                : new CapsuleCollider[0];
 
+            newCloth.cubeColliders = (_ucCloth.cubeColliders != null && _ucCloth.cubeColliders.Length > 0)
+                ? (BoxCollider[])_ucCloth.cubeColliders.Clone()
+                : new BoxCollider[0];
+
+            newCloth.pinColliders = (_ucCloth.pinColliders != null && _ucCloth.pinColliders.Count > 0)
+                ? new System.Collections.Generic.List<Collider>(_ucCloth.pinColliders)
+                : new System.Collections.Generic.List<Collider>();
+
+            // FIX Bug #4: cloth mesh là non-convex (mặt phẳng/dạng tấm).
+            // convex=true trên mesh phẳng thường bị Unity reject hoặc tạo collider sai,
+            // khiến các piece spawn ra không thể cắt tiếp. Dùng convex=false.
+            // Nếu cần Rigidbody + physics collision, hãy dùng primitive collider riêng.
             var mc = piece.AddComponent<MeshCollider>();
             mc.sharedMesh = mesh;
-            mc.convex     = true;
+            mc.convex     = false;
 
             var rb = piece.AddComponent<Rigidbody>();
             rb.useGravity  = true;
@@ -573,7 +606,7 @@ public class MeshCutter_UCloth
                 Debug.LogWarning($"[MeshCutter_UCloth] Piece '{name}': Không tìm thấy UClothLaserGrabber trên original '{_target.name}'. Piece sẽ không thể grab được.");
             }
 
-            Debug.Log($"[MeshCutter_UCloth] Piece '{name}': UCCloth + Rigidbody(gravity) + MeshCollider added, {mesh.vertexCount} verts, {tc} tris.");
+            Debug.Log($"[MeshCutter_UCloth] Piece '{name}': UCCloth + Rigidbody(gravity) + MeshCollider(non-convex) added, {mesh.vertexCount} verts, {tc} tris.");
         }
         else
         {
@@ -592,9 +625,18 @@ public class MeshCutter_UCloth
     //  CÁC HELPER
     // =========================================================================
 
+    /// <summary>
+    /// Build _renderToSimLookup: ánh xạ render vertex index → sim node index gần nhất.
+    /// CHỈ gọi từ Initialize(), sau khi simData đã sẵn sàng.
+    /// </summary>
     private void BuildRenderToSimLookup()
     {
-        if (_ucCloth.simData == null || !_ucCloth.simData.positionsReadOnly.IsCreated) return;
+        if (_ucCloth == null) return;
+        if (_ucCloth.simData == null || !_ucCloth.simData.positionsReadOnly.IsCreated)
+        {
+            Debug.LogWarning($"[MeshCutter_UCloth] BuildRenderToSimLookup: simData chưa sẵn sàng cho '{_target.name}'. Lookup không được build.");
+            return;
+        }
 
         var sim    = _ucCloth.simData.positionsReadOnly;
         var rVerts = _mf.mesh.vertices;
@@ -616,6 +658,8 @@ public class MeshCutter_UCloth
             }
             _renderToSimLookup[ri] = best;
         }
+
+        Debug.Log($"[MeshCutter_UCloth] BuildRenderToSimLookup: {rCount} render verts → {sCount} sim nodes mapped.");
     }
 
     private Vector3[] GetWorldSpaceVertices(Vector3[] localVerts)
