@@ -3,29 +3,19 @@ using UnityEngine;
 using System.Linq;
 
 /// <summary>
-/// SewingManager_UCloth – phát hiện đối tượng vải bằng Ray thay vì OverlapSphere.
+/// SewingManager_UCloth – phát hiện đối tượng vải bằng Collider thay vì Ray.
 ///
-/// v2 – Ray-based detection:
-///   Bắn Ray từ transform của sewer theo hướng forward.
-///   Tìm tất cả cloth object có Renderer bounds bị ray đi qua trong khoảng rayLength,
-///   sau đó lấy tối đa 2 object gần ray.origin nhất để thực hiện khâu.
+/// v3 – Collider-based detection:
+///   Dùng Collider gắn trên sewer để phát hiện cloth object trong vùng tiếp xúc.
+///   Tìm tất cả cloth object có Renderer bounds giao với bounds của sewer collider,
+///   sau đó lấy tối đa 2 object gần sewer nhất để thực hiện khâu.
 ///   Toàn bộ logic AddWeldPair / UpdateWeldPhysics giữ nguyên.
 /// </summary>
 public class SewingManager_UCloth : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("GameObject của sewer – Ray bắn từ vị trí này theo hướng forward của nó.")]
+    [Tooltip("GameObject của sewer – phải có Collider để phát hiện vùng khâu.")]
     public GameObject sewer;
-
-    [Header("Ray Settings")]
-    [Tooltip("Chiều dài tối đa của ray khâu (m).")]
-    public float rayLength = 3f;
-
-    [Tooltip("Bán kính ống bao quanh ray để phát hiện cloth object (m).")]
-    public float rayRadius = 0.05f;
-
-    [Tooltip("Hiển thị ray debug trong Scene view.")]
-    public bool showDebugRay = true;
 
     [Header("Sewing Settings")]
     public string clothTag = "Cloth";
@@ -41,25 +31,42 @@ public class SewingManager_UCloth : MonoBehaviour
 
     // ── private ──────────────────────────────────────────────────────────────
 
+    private Collider _sewerCollider;
     private MeshSewer_UCloth _weldLogic;
     private GameObject _objA, _objB;
 
     private readonly Dictionary<int, float> _nodeCooldownsA = new Dictionary<int, float>();
     private readonly Dictionary<int, float> _nodeCooldownsB = new Dictionary<int, float>();
 
+    void Start()
+    {
+        if (sewer == null)
+        {
+            Debug.LogError("[SewingManager_UCloth] Chưa gán Sewer!");
+            enabled = false;
+            return;
+        }
+
+        _sewerCollider = sewer.GetComponent<Collider>();
+        if (_sewerCollider == null)
+        {
+            Debug.LogError("[SewingManager_UCloth] Sewer không có Collider!");
+            enabled = false;
+            return;
+        }
+    }
+
     // ── Update ───────────────────────────────────────────────────────────────
 
     void LateUpdate()
     {
-        if (sewer == null) return;
+        if (_sewerCollider == null) return;
 
-        Ray sewRay = GetSewerRay();
-
-        var touching = FindClothObjectsAlongRay(sewRay);
+        var touching = FindClothObjectsOverlappingCollider();
         if (touching.Count < 2) return;
 
         // Sắp xếp ổn định theo InstanceID để tránh hoán đổi mỗi frame
-        var sorted     = touching.OrderBy(g => g.GetInstanceID()).ToList();
+        var sorted        = touching.OrderBy(g => g.GetInstanceID()).ToList();
         GameObject candidateA = sorted[0];
         GameObject candidateB = sorted[1];
 
@@ -76,8 +83,8 @@ public class SewingManager_UCloth : MonoBehaviour
             Debug.Log($"<color=yellow>[SewingManager]</color> Cặp vải mới: {_objA.name} & {_objB.name}");
         }
 
-        // Tìm hit point trên ray gần vải nhất để làm tâm tìm sim-node
-        Vector3 sewPoint = GetRayHitPoint(sewRay, _objA);
+        // Dùng tâm collider của sewer làm điểm tham chiếu tìm sim-node
+        Vector3 sewPoint = _sewerCollider.bounds.center;
         TryWeldAtPosition(sewPoint);
     }
 
@@ -86,31 +93,18 @@ public class SewingManager_UCloth : MonoBehaviour
         _weldLogic?.UpdateWeldPhysics();
     }
 
-    // ── Ray helpers ───────────────────────────────────────────────────────────
-
-    private Ray GetSewerRay()
-        => new Ray(sewer.transform.position, sewer.transform.forward);
+    // ── Collider helpers ──────────────────────────────────────────────────────
 
     /// <summary>
-    /// Trả về điểm gần nhất trên ray với bounds của obj,
-    /// hoặc ray.origin nếu không tính được.
+    /// Tìm tất cả GameObject có tag clothTag mà bounds của chúng giao với bounds của sewer collider.
+    /// Kết quả sắp xếp từ gần đến xa theo khoảng cách bounds center với sewer.
     /// </summary>
-    private Vector3 GetRayHitPoint(Ray ray, GameObject obj)
+    private List<GameObject> FindClothObjectsOverlappingCollider()
     {
-        var renderer = obj.GetComponent<Renderer>();
-        if (renderer != null && renderer.bounds.IntersectRay(ray, out float dist))
-            return ray.GetPoint(Mathf.Max(0f, dist));
-        return ray.origin;
-    }
-
-    /// <summary>
-    /// Tìm tất cả GameObject có tag clothTag mà ray đi qua (bounds + rayRadius tolerance).
-    /// Kết quả sắp xếp từ gần đến xa theo bounds center distance với ray.origin.
-    /// </summary>
-    private List<GameObject> FindClothObjectsAlongRay(Ray ray)
-    {
-        var result      = new List<(GameObject obj, float dist)>();
+        var result       = new List<(GameObject obj, float dist)>();
         var clothObjects = GameObject.FindGameObjectsWithTag(clothTag);
+        var sewerBounds  = _sewerCollider.bounds;
+        var sewerCenter  = sewerBounds.center;
 
         foreach (var obj in clothObjects)
         {
@@ -121,14 +115,10 @@ public class SewingManager_UCloth : MonoBehaviour
             var renderer = obj.GetComponent<Renderer>();
             if (renderer == null) continue;
 
-            // Mở rộng bounds theo rayRadius rồi test
-            Bounds expanded = renderer.bounds;
-            expanded.Expand(rayRadius * 2f);
-
-            if (expanded.IntersectRay(ray, out float t) && t <= rayLength + rayRadius)
+            if (sewerBounds.Intersects(renderer.bounds))
             {
-                float distToOrigin = Vector3.Distance(ray.origin, renderer.bounds.center);
-                result.Add((obj, distToOrigin));
+                float dist = Vector3.Distance(sewerCenter, renderer.bounds.center);
+                result.Add((obj, dist));
             }
         }
 
@@ -209,17 +199,12 @@ public class SewingManager_UCloth : MonoBehaviour
 
     void OnDrawGizmos()
     {
-        if (sewer == null || !showDebugRay) return;
+        if (sewer == null) return;
 
-        Ray ray = new Ray(sewer.transform.position, sewer.transform.forward);
+        var col = sewer.GetComponent<Collider>();
+        if (col == null) return;
 
-        // Đường ray chính
-        Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.9f);
-        Gizmos.DrawRay(ray.origin, ray.direction * rayLength);
-
-        // Bán kính ảnh hưởng ở đầu và cuối ray
-        Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.25f);
-        Gizmos.DrawSphere(ray.origin, rayRadius);
-        Gizmos.DrawSphere(ray.origin + ray.direction * rayLength, rayRadius);
+        Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.4f);
+        Gizmos.DrawWireCube(col.bounds.center, col.bounds.size);
     }
 }
