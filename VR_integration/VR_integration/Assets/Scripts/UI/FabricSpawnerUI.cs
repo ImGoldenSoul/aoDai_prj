@@ -1,4 +1,5 @@
 using UnityEngine;
+using System.Collections.Generic;
 
 public class FabricSpawnerUI : MonoBehaviour
 {
@@ -6,57 +7,115 @@ public class FabricSpawnerUI : MonoBehaviour
     public GameObject fabricPrefab;
     public Transform spawnPoint;
 
+    [Header("Cài đặt Spawn liên tiếp")]
+    public Vector3 spawnOffset = new Vector3(0.5f, 0, 0); 
+    private int spawnCount = 0;
+
+    [Header("Quản lý bộ nhớ Spawn")]
+    [Tooltip("Danh sách tự động lưu các miếng vải đã tạo")]
+    public List<GameObject> spawnedFabrics = new List<GameObject>(); 
+
     [Header("Cài đặt Quản lý")]
     public string containerTag = "FabricContainer";
     public CuttingManager_UCloth cuttingManager;
-
-    [Header("Cầu nối VR cho Prefab mới")]
-    [Tooltip("Kéo Right Controller từ Scene vào đây")]
-    public Transform rightHandController;
-    
-    [Tooltip("Kéo quả cầu Grab Sphere (mục tiêu đỏ) vào đây")]
-    public Transform grabSphereTarget;
 
     public void SpawnNewFabric()
     {
         if (fabricPrefab == null) return;
 
-        // 1. Dọn dẹp tổ hợp cũ
-        GameObject[] oldContainers = GameObject.FindGameObjectsWithTag(containerTag);
-        foreach (GameObject oldObj in oldContainers)
-        {
-            Destroy(oldObj);
-        }
-
-        // 2. Sinh ra tổ hợp mới tại điểm Spawn
-        Vector3 pos = spawnPoint != null ? spawnPoint.position : Vector3.zero;
+        // 1. Tính toán vị trí mới
+        Vector3 basePos = spawnPoint != null ? spawnPoint.position : Vector3.zero;
+        Vector3 finalPos = basePos + (spawnOffset * spawnCount);
         Quaternion rot = spawnPoint != null ? spawnPoint.rotation : Quaternion.identity;
-        GameObject newFabricGroup = Instantiate(fabricPrefab, pos, rot);
+        
+        // 2. Sinh ra tổ hợp mới
+        GameObject newFabricGroup = Instantiate(fabricPrefab, finalPos, rot);
         newFabricGroup.tag = containerTag;
 
-        // 3. TIÊM DỮ LIỆU: Phục hồi trí nhớ cho tấm vải mới
-        if (cuttingManager != null)
-        {
-            UCloth.UCCloth[] uCloths = newFabricGroup.GetComponentsInChildren<UCloth.UCCloth>();
-            
-            foreach (var clothObj in uCloths)
-            {
-                // -- A. Phục hồi tính năng Cầm Nắm (Grab) --
-                UClothLaserGrabber grabber = clothObj.GetComponent<UClothLaserGrabber>();
-                if (grabber != null)
-                {
-                    grabber.vrController = rightHandController;
-                    grabber.grabSphere = grabSphereTarget;
-                    // (Script UClothPinner sẽ tự động tìm thấy Grabber, không cần gán thêm)
-                }
+        // BƯỚC MỚI: Thêm miếng vải vừa tạo vào danh sách trí nhớ
+        spawnedFabrics.Add(newFabricGroup);
 
-                // -- B. Phục hồi tính năng Cắt (Cut) --
-                // Đảm bảo tấm vải có tag đúng trước khi đưa vào máy cắt
-                clothObj.gameObject.tag = "Cloth"; 
+        // Tăng bộ đếm
+        spawnCount++;
+
+        // 3. Tự động kế thừa giá trị từ VRContext
+        if (VRContext.Instance == null)
+        {
+            Debug.LogError("Chưa tìm thấy VRContext trong Scene!");
+            return;
+        }
+
+        UCloth.UCCloth[] uCloths = newFabricGroup.GetComponentsInChildren<UCloth.UCCloth>();
+        
+        foreach (var clothObj in uCloths)
+        {
+            UClothLaserGrabber grabber = clothObj.GetComponent<UClothLaserGrabber>();
+            if (grabber != null)
+            {
+                grabber.vrController = VRContext.Instance.leftHandController; 
+                grabber.grabSphere = VRContext.Instance.grabSphereTarget;
+            }
+
+            clothObj.gameObject.tag = "Cloth"; 
+            if (cuttingManager != null)
+            {
                 cuttingManager.RegisterClothObject(clothObj.gameObject);
-                
-                Debug.Log($"[FabricSpawnerUI] Đã phục hồi toàn bộ tương tác VR cho: {clothObj.gameObject.name}");
+            }
+            
+            Debug.Log($"[FabricSpawnerUI] Spawn miếng vải số {spawnCount} thành công!");
+        }
+    }
+
+    // ==========================================
+    // HÀM: DÀNH CHO NÚT DELETE (Xóa 1 cái gần nhất)
+    // ==========================================
+    public void DeleteLastFabric()
+    {
+        if (spawnedFabrics.Count > 0)
+        {
+            int lastIndex = spawnedFabrics.Count - 1;
+            GameObject lastFabric = spawnedFabrics[lastIndex];
+
+            if (lastFabric != null)
+            {
+                Destroy(lastFabric);
+            }
+
+            spawnedFabrics.RemoveAt(lastIndex);
+
+            if (spawnCount > 0)
+            {
+                spawnCount--;
+            }
+
+            Debug.Log("[FabricSpawnerUI] Đã xóa miếng vải gần nhất!");
+        }
+        else
+        {
+            Debug.LogWarning("[FabricSpawnerUI] Không còn miếng vải nào để xóa nữa!");
+        }
+    }
+
+    // ==========================================
+    // HÀM MỚI: DÀNH CHO NÚT RESTART (Xóa tất cả)
+    // ==========================================
+    public void Restart()
+    {
+        // 1. Duyệt qua toàn bộ danh sách và tiêu hủy từng Game Object
+        foreach (GameObject fabric in spawnedFabrics)
+        {
+            if (fabric != null)
+            {
+                Destroy(fabric);
             }
         }
+
+        // 2. Dọn sạch danh sách trí nhớ
+        spawnedFabrics.Clear();
+
+        // 3. Reset bộ đếm vị trí về 0 để bắt đầu lại từ đầu
+        spawnCount = 0;
+
+        Debug.Log("[FabricSpawnerUI] Đã Restart: Xóa toàn bộ vải và reset vị trí!");
     }
 }
