@@ -8,12 +8,12 @@ public class FabricSpawnerUI : MonoBehaviour
     public Transform spawnPoint;
 
     [Header("Cài đặt Spawn liên tiếp")]
-    public Vector3 spawnOffset = new Vector3(0.5f, 0, 0); 
+    public Vector3 spawnOffset = new Vector3(0.5f, 0, 0);
     private int spawnCount = 0;
 
     [Header("Quản lý bộ nhớ Spawn")]
     [Tooltip("Danh sách tự động lưu các miếng vải đã tạo")]
-    public List<GameObject> spawnedFabrics = new List<GameObject>(); 
+    public List<GameObject> spawnedFabrics = new List<GameObject>();
 
     [Header("Cài đặt Quản lý")]
     public string containerTag = "FabricContainer";
@@ -27,7 +27,7 @@ public class FabricSpawnerUI : MonoBehaviour
         Vector3 basePos = spawnPoint != null ? spawnPoint.position : Vector3.zero;
         Vector3 finalPos = basePos + (spawnOffset * spawnCount);
         Quaternion rot = spawnPoint != null ? spawnPoint.rotation : Quaternion.identity;
-        
+
         // 2. Sinh ra tổ hợp mới
         GameObject newFabricGroup = Instantiate(fabricPrefab, finalPos, rot);
         newFabricGroup.tag = containerTag;
@@ -46,23 +46,34 @@ public class FabricSpawnerUI : MonoBehaviour
         }
 
         UCloth.UCCloth[] uCloths = newFabricGroup.GetComponentsInChildren<UCloth.UCCloth>();
-        
+
         foreach (var clothObj in uCloths)
         {
             UClothLaserGrabber grabber = clothObj.GetComponent<UClothLaserGrabber>();
             if (grabber != null)
             {
-                grabber.vrController = VRContext.Instance.leftHandController; 
+                grabber.vrController = VRContext.Instance.leftHandController;
                 grabber.grabSphere = VRContext.Instance.grabSphereTarget;
             }
 
-            clothObj.gameObject.tag = "Cloth"; 
+            clothObj.gameObject.tag = "Cloth";
             if (cuttingManager != null)
             {
                 cuttingManager.RegisterClothObject(clothObj.gameObject);
             }
-            
-            Debug.Log($"[FabricSpawnerUI] Spawn miếng vải số {spawnCount} thành công!");
+
+            // -- TỰ ĐỘNG GÁN VA CHẠM SÀN/BÀN --
+            if (VRContext.Instance.environmentColliders != null && VRContext.Instance.environmentColliders.Length > 0)
+            {
+                // Gán danh sách Box Collider vào mảng cubeColliders của UCloth
+                clothObj.cubeColliders = VRContext.Instance.environmentColliders;
+
+                /* LƯU Ý: Nếu dòng trên bị báo lỗi đỏ gạch chân (trường hợp UCloth update dùng List thay vì Array), 
+                   bạn hãy XÓA dòng trên đi và BỎ DẤU // ở dòng dưới đây để thay thế: */
+                // clothObj.cubeColliders.AddRange(VRContext.Instance.environmentColliders);
+            }
+
+            Debug.Log($"[FabricSpawnerUI] Spawn miếng vải số {spawnCount} thành công và đã nhận diện mặt sàn!");
         }
     }
 
@@ -97,7 +108,7 @@ public class FabricSpawnerUI : MonoBehaviour
     }
 
     // ==========================================
-    // HÀM MỚI: DÀNH CHO NÚT RESTART (Xóa tất cả)
+    // HÀM: DÀNH CHO NÚT RESTART (Xóa tất cả)
     // ==========================================
     public void Restart()
     {

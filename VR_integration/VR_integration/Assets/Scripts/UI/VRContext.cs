@@ -1,4 +1,4 @@
-using UnityEngine;
+﻿using UnityEngine;
 
 public class VRContext : MonoBehaviour
 {
@@ -7,6 +7,10 @@ public class VRContext : MonoBehaviour
     [Header("Global VR References")]
     public Transform leftHandController;
     public Transform grabSphereTarget;
+
+    [Header("Môi trường (Sàn, Bàn...)")]
+    [Tooltip("Kéo Box Collider của mặt bàn, sàn nhà vào đây")]
+    public BoxCollider[] environmentColliders;
 
     void Awake()
     {
