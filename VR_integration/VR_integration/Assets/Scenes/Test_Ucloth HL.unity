@@ -18465,7 +18465,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   cutter: {fileID: 1677894142041171170}
   checkInterval: 3
-  splitOnlyWhenDisconnected: 1
+  splitOnlyWhenDisconnected: 0
   splitForce: 1.5
   clothTag: Cloth
 --- !u!1 &1602418709

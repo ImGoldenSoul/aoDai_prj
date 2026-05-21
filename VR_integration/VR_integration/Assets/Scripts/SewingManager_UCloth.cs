@@ -1,210 +1,267 @@
+// ============================================================
+//  SewingManager_UCloth.cs  — v5.0  (self-sewing + scene registration)
+//
+//  Thay đổi so với v4:
+//    - Hỗ trợ TỰ KHÂU: khi ray chỉ chạm 1 cloth object có ≥2 boundary
+//      loop gần nhau, MeshSewer được gọi với goA == goB.
+//    - Sau Finalize(), mesh mới được đăng ký tự động với:
+//        · VRContext (grabber, environmentColliders)
+//        · FabricSpawnerUI.spawnedFabrics (để DeleteLast/Restart hoạt động)
+//        · CuttingManager (nếu có)
+//    - Loại bỏ logic "if _objA == _objB return" — cùng object vẫn
+//      được xử lý khi là tự khâu.
+//    - Mesh đã merge (sau khi khâu) vẫn khâu được tiếp vì nó có tag
+//      "Cloth", UCCloth component, và MeshCollider — raycast hoạt động
+//      bình thường.
+// ============================================================
 using System.Collections.Generic;
 using UnityEngine;
 using System.Linq;
 
-/// <summary>
-/// SewingManager_UCloth – phát hiện đối tượng vải bằng Collider thay vì Ray.
-///
-/// v3 – Collider-based detection:
-///   Dùng Collider gắn trên sewer để phát hiện cloth object trong vùng tiếp xúc.
-///   Tìm tất cả cloth object có Renderer bounds giao với bounds của sewer collider,
-///   sau đó lấy tối đa 2 object gần sewer nhất để thực hiện khâu.
-///   Toàn bộ logic AddWeldPair / UpdateWeldPhysics giữ nguyên.
-/// </summary>
 public class SewingManager_UCloth : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("GameObject của sewer – phải có Collider để phát hiện vùng khâu.")]
+    [Tooltip("GameObject của sewer — Ray bắn từ vị trí này theo hướng forward.")]
     public GameObject sewer;
+
+    [Header("Ray Settings")]
+    public float rayLength   = 3f;
+    public float rayRadius   = 0.05f;
+    public bool  showDebugRay = true;
 
     [Header("Sewing Settings")]
     public string clothTag = "Cloth";
 
-    [Tooltip("Bán kính quanh điểm chạm (hit point) để tìm sim-node của vải A.")]
-    public float sewRadius = 0.03f;
+    [Tooltip("Khoảng cách tối đa để hàn hai boundary vertex (world units).")]
+    public float weldThreshold = 0.008f;
 
-    [Tooltip("Khoảng cách tối đa từ node A đến node B trên vải B để được khâu.")]
-    public float maxCrossClothDistance = 0.15f;
+    [Tooltip("Bán kính vùng khâu tính từ điểm ray chạm vào vải (world units).")]
+    public float sewRadius = 0.1f;
 
-    [Tooltip("Khoảng thời gian chờ (giây) trước khi một node có thể được khâu tiếp")]
-    public float sewCooldown = 0.5f;
+    [Tooltip("Số edge hàn mỗi frame (progressive mode).")]
+    public int edgesPerFrame = 3;
 
-    // ── private ──────────────────────────────────────────────────────────────
+    [Tooltip("TRUE = hàn toàn bộ ngay lập tức.")]
+    public bool immediateWeld = false;
 
-    private Collider _sewerCollider;
-    private MeshSewer_UCloth _weldLogic;
+    [Header("Scene Registration")]
+    [Tooltip("FabricSpawnerUI để đăng ký mesh mới vào danh sách spawnedFabrics.")]
+    public FabricSpawnerUI fabricSpawnerUI;
+
+    [Tooltip("CuttingManager để đăng ký mesh mới (có thể null).")]
+    public CuttingManager_UCloth cuttingManager;
+
+    // ── Private ───────────────────────────────────────────────────────────
+    private MeshSewer_UCloth _sewer;
     private GameObject _objA, _objB;
+    private bool _isSelfSew;
+    private bool _sewingInProgress;
 
-    private readonly Dictionary<int, float> _nodeCooldownsA = new Dictionary<int, float>();
-    private readonly Dictionary<int, float> _nodeCooldownsB = new Dictionary<int, float>();
+    // Gizmo
+    private Vector3 _gizmoHitA, _gizmoHitB;
+    private bool    _gizmoHasHit;
 
-    void Start()
-    {
-        if (sewer == null)
-        {
-            Debug.LogError("[SewingManager_UCloth] Chưa gán Sewer!");
-            enabled = false;
-            return;
-        }
-
-        _sewerCollider = sewer.GetComponent<Collider>();
-        if (_sewerCollider == null)
-        {
-            Debug.LogError("[SewingManager_UCloth] Sewer không có Collider!");
-            enabled = false;
-            return;
-        }
-    }
-
-    // ── Update ───────────────────────────────────────────────────────────────
-
+    // ── LateUpdate ────────────────────────────────────────────────────────
     void LateUpdate()
-    {
-        if (_sewerCollider == null) return;
-
-        var touching = FindClothObjectsOverlappingCollider();
-        if (touching.Count < 2) return;
-
-        // Sắp xếp ổn định theo InstanceID để tránh hoán đổi mỗi frame
-        var sorted        = touching.OrderBy(g => g.GetInstanceID()).ToList();
-        GameObject candidateA = sorted[0];
-        GameObject candidateB = sorted[1];
-
-        if (_objA != candidateA || _objB != candidateB)
-        {
-            _objA = candidateA;
-            _objB = candidateB;
-            _weldLogic = new MeshSewer_UCloth(
-                _objA.GetComponent<UCloth.UCCloth>(),
-                _objB.GetComponent<UCloth.UCCloth>()
-            );
-            _nodeCooldownsA.Clear();
-            _nodeCooldownsB.Clear();
-            Debug.Log($"<color=yellow>[SewingManager]</color> Cặp vải mới: {_objA.name} & {_objB.name}");
-        }
-
-        // Dùng tâm collider của sewer làm điểm tham chiếu tìm sim-node
-        Vector3 sewPoint = _sewerCollider.bounds.center;
-        TryWeldAtPosition(sewPoint);
-    }
-
-    void FixedUpdate()
-    {
-        _weldLogic?.UpdateWeldPhysics();
-    }
-
-    // ── Collider helpers ──────────────────────────────────────────────────────
-
-    /// <summary>
-    /// Tìm tất cả GameObject có tag clothTag mà bounds của chúng giao với bounds của sewer collider.
-    /// Kết quả sắp xếp từ gần đến xa theo khoảng cách bounds center với sewer.
-    /// </summary>
-    private List<GameObject> FindClothObjectsOverlappingCollider()
-    {
-        var result       = new List<(GameObject obj, float dist)>();
-        var clothObjects = GameObject.FindGameObjectsWithTag(clothTag);
-        var sewerBounds  = _sewerCollider.bounds;
-        var sewerCenter  = sewerBounds.center;
-
-        foreach (var obj in clothObjects)
-        {
-            if (obj == null || !obj.activeSelf) continue;
-            var uc = obj.GetComponent<UCloth.UCCloth>();
-            if (uc == null) continue;
-
-            var renderer = obj.GetComponent<Renderer>();
-            if (renderer == null) continue;
-
-            if (sewerBounds.Intersects(renderer.bounds))
-            {
-                float dist = Vector3.Distance(sewerCenter, renderer.bounds.center);
-                result.Add((obj, dist));
-            }
-        }
-
-        return result
-            .OrderBy(x => x.dist)
-            .Select(x => x.obj)
-            .ToList();
-    }
-
-    // ── Sewing logic (giữ nguyên hoàn toàn) ─────────────────────────────────
-
-    private void TryWeldAtPosition(Vector3 sewPoint)
-    {
-        float currentTime = Time.time;
-
-        List<int> indicesA = GetAllSimIndicesInRadius(_objA, sewPoint, sewRadius);
-
-        foreach (int idxA in indicesA)
-        {
-            if (_nodeCooldownsA.TryGetValue(idxA, out float lastTimeA) &&
-                currentTime - lastTimeA < sewCooldown)
-                continue;
-
-            Vector3 posA = (Vector3)_objA.GetComponent<UCloth.UCCloth>()
-                                         .simData.positionsReadOnly[idxA];
-
-            int idxB = GetClosestSimIndexInRadius(_objB, posA, maxCrossClothDistance);
-
-            if (idxB == -1) continue;
-            if (_nodeCooldownsB.TryGetValue(idxB, out float lastTimeB) &&
-                currentTime - lastTimeB < sewCooldown)
-                continue;
-
-            _weldLogic.AddWeldPair(idxA, idxB);
-
-            _nodeCooldownsA[idxA] = currentTime;
-            _nodeCooldownsB[idxB] = currentTime;
-
-            Debug.Log($"<color=green>[Sewing]</color> Khâu: A({idxA}) ↔ B({idxB})");
-        }
-    }
-
-    private List<int> GetAllSimIndicesInRadius(GameObject obj, Vector3 center, float radius)
-    {
-        var result = new List<int>();
-        var uc = obj.GetComponent<UCloth.UCCloth>();
-        if (uc?.simData == null || !uc.simData.positionsReadOnly.IsCreated) return result;
-
-        var   positions = uc.simData.positionsReadOnly;
-        float rSqr      = radius * radius;
-        for (int i = 0; i < positions.Length; i++)
-        {
-            if (Vector3.SqrMagnitude((Vector3)positions[i] - center) < rSqr)
-                result.Add(i);
-        }
-        return result;
-    }
-
-    private int GetClosestSimIndexInRadius(GameObject obj, Vector3 targetWorldPos, float maxRadius)
-    {
-        var uc = obj.GetComponent<UCloth.UCCloth>();
-        if (uc?.simData == null || !uc.simData.positionsReadOnly.IsCreated) return -1;
-
-        var   positions = uc.simData.positionsReadOnly;
-        float maxSqr    = maxRadius * maxRadius;
-        float minSqr    = float.MaxValue;
-        int   best      = -1;
-
-        for (int i = 0; i < positions.Length; i++)
-        {
-            float sqrDist = Vector3.SqrMagnitude((Vector3)positions[i] - targetWorldPos);
-            if (sqrDist < minSqr && sqrDist < maxSqr) { minSqr = sqrDist; best = i; }
-        }
-        return best;
-    }
-
-    // ── Gizmos ───────────────────────────────────────────────────────────────
-
-    void OnDrawGizmos()
     {
         if (sewer == null) return;
 
-        var col = sewer.GetComponent<Collider>();
-        if (col == null) return;
+        // Progressive sewing
+        if (_sewingInProgress && _sewer != null)
+        {
+            bool done = _sewer.Sew();
+            if (done) CommitSewn();
+            return;
+        }
 
-        Gizmos.color = new Color(0.2f, 0.8f, 1f, 0.4f);
-        Gizmos.DrawWireCube(col.bounds.center, col.bounds.size);
+        Ray sewRay = new Ray(sewer.transform.position, sewer.transform.forward);
+
+        // ── Raycast vào MeshCollider ─────────────────────────────────────
+        var hits = Physics.RaycastAll(sewRay, rayLength)
+                          .OrderBy(h => h.distance)
+                          .ToList();
+
+        // Thu thập các cloth hit (tối đa 2 object khác nhau)
+        var clothHits = new List<(GameObject go, Vector3 point)>();
+        var seen      = new HashSet<GameObject>();
+
+        foreach (var h in hits)
+        {
+            var go = h.collider.gameObject;
+            if (!go.CompareTag(clothTag)) continue;
+            if (go.GetComponent<UCloth.UCCloth>() == null) continue;
+            if (seen.Contains(go)) continue;
+
+            clothHits.Add((go, h.point));
+            seen.Add(go);
+            if (clothHits.Count == 2) break;
+        }
+
+        // ── Xác định chế độ khâu ────────────────────────────────────────
+        GameObject goA, goB;
+        Vector3    hitA, hitB;
+        bool       isSelf;
+
+        if (clothHits.Count == 0)
+        {
+            _gizmoHasHit = false;
+            return;
+        }
+        else if (clothHits.Count == 1)
+        {
+            // Chỉ 1 cloth → tự khâu (mesh phải có ≥2 boundary loop)
+            (goA, hitA) = clothHits[0];
+            goB  = goA;
+            hitB = hitA;
+            isSelf = true;
+        }
+        else
+        {
+            // 2 cloth khác nhau → khâu bình thường
+            (goA, hitA) = clothHits[0];
+            (goB, hitB) = clothHits[1];
+            isSelf = false;
+        }
+
+        // ── Tránh khởi động lại khi đang khâu đúng cặp ──────────────────
+        // (Không cần sort InstanceID vì MeshSewer v5 xử lý bất kỳ thứ tự nào)
+        if (!_sewingInProgress && _objA == goA && _objB == goB) return;
+
+        // ── Bắt đầu pipeline khâu mới ────────────────────────────────────
+        _objA      = goA;
+        _objB      = goB;
+        _isSelfSew = isSelf;
+
+        _gizmoHitA   = hitA;
+        _gizmoHitB   = hitB;
+        _gizmoHasHit = true;
+
+        if (isSelf)
+            Debug.Log($"<color=cyan>[SewingManager]</color> Tự khâu: {goA.name}@{hitA:F3}");
+        else
+            Debug.Log($"<color=yellow>[SewingManager]</color> Khâu: {goA.name}@{hitA:F3} <-> {goB.name}@{hitB:F3}");
+
+        _sewer = new MeshSewer_UCloth(goA, goB, weldThreshold,
+                                       immediateWeld ? int.MaxValue : edgesPerFrame);
+
+        // Đăng ký callback TRƯỚC khi Initialize — để OnSeamCompleted
+        // được gọi khi Finalize() hoàn thành.
+        _sewer.OnSeamCompleted = RegisterSewnMesh;
+
+        if (!_sewer.Initialize(hitA, hitB, sewRadius))
+        {
+            Debug.LogWarning("[SewingManager] Initialize() thất bại.");
+            _sewer = null;
+            _objA  = _objB = null;
+            return;
+        }
+
+        _sewingInProgress = true;
+
+        if (immediateWeld)
+        {
+            while (!_sewer.Sew()) { }
+            CommitSewn();
+        }
+    }
+
+    // ── CommitSewn ────────────────────────────────────────────────────────
+    private void CommitSewn()
+    {
+        string name = _isSelfSew
+            ? $"{_objA.name}_SelfSewn"
+            : $"{_objA.name}_{_objB.name}_Sewn";
+
+        // Finalize() sẽ gọi RegisterSewnMesh() qua OnSeamCompleted
+        _sewer.Finalize(name);
+        _sewer            = null;
+        _sewingInProgress = false;
+        _objA = _objB     = null;
+        _gizmoHasHit      = false;
+    }
+
+    // ── RegisterSewnMesh ──────────────────────────────────────────────────
+    /// <summary>
+    /// Callback từ MeshSewer.OnSeamCompleted — đăng ký GameObject mới vào scene.
+    /// Mesh mới nhận đầy đủ: VRContext grabber, environmentColliders,
+    /// FabricSpawnerUI list, CuttingManager.
+    /// </summary>
+    private void RegisterSewnMesh(GameObject sewn)
+    {
+        if (sewn == null) return;
+
+        // 1. VRContext — grabber + floor colliders
+        if (VRContext.Instance != null)
+        {
+            var grabber = sewn.GetComponent<UClothLaserGrabber>();
+            if (grabber != null)
+            {
+                grabber.vrController = VRContext.Instance.leftHandController;
+                grabber.grabSphere   = VRContext.Instance.grabSphereTarget;
+            }
+
+            var uc = sewn.GetComponent<UCloth.UCCloth>();
+            if (uc != null && VRContext.Instance.environmentColliders != null
+                           && VRContext.Instance.environmentColliders.Length > 0)
+            {
+                uc.cubeColliders = MergeArrays(uc.cubeColliders,
+                                               VRContext.Instance.environmentColliders);
+            }
+        }
+        else
+        {
+            Debug.LogWarning("[SewingManager] VRContext.Instance == null — grabber không được gán!");
+        }
+
+        // 2. FabricSpawnerUI — thêm vào danh sách spawnedFabrics
+        //    để DeleteLastFabric() và Restart() vẫn hoạt động với mesh mới
+        if (fabricSpawnerUI != null)
+        {
+            fabricSpawnerUI.spawnedFabrics.Add(sewn);
+            Debug.Log($"[SewingManager] Đã thêm '{sewn.name}' vào FabricSpawnerUI.spawnedFabrics " +
+                      $"(tổng: {fabricSpawnerUI.spawnedFabrics.Count})");
+        }
+
+        // 3. CuttingManager
+        if (cuttingManager != null)
+        {
+            cuttingManager.RegisterClothObject(sewn);
+        }
+
+        Debug.Log($"[SewingManager] ✓ Mesh '{sewn.name}' đã đăng ký vào scene.");
+    }
+
+    // ── Helpers ───────────────────────────────────────────────────────────
+    private static T[] MergeArrays<T>(T[] a, T[] b)
+    {
+        if (a == null || a.Length == 0) return b ?? new T[0];
+        if (b == null || b.Length == 0) return a;
+        var result = new T[a.Length + b.Length];
+        a.CopyTo(result, 0);
+        b.CopyTo(result, a.Length);
+        return result;
+    }
+
+    // ── Gizmos ────────────────────────────────────────────────────────────
+    void OnDrawGizmos()
+    {
+        if (sewer == null || !showDebugRay) return;
+
+        var ray = new Ray(sewer.transform.position, sewer.transform.forward);
+        Gizmos.color = _sewingInProgress
+            ? new Color(0.2f, 1f, 0.3f, 0.9f)
+            : new Color(0.2f, 0.8f, 1f, 0.9f);
+        Gizmos.DrawRay(ray.origin, ray.direction * rayLength);
+
+        if (_gizmoHasHit)
+        {
+            Gizmos.color = new Color(1f, 0.6f, 0f, 0.9f);
+            Gizmos.DrawSphere(_gizmoHitA, 0.01f);
+            if (!_isSelfSew) Gizmos.DrawSphere(_gizmoHitB, 0.01f);
+
+            Gizmos.color = new Color(1f, 0.6f, 0f, 0.15f);
+            Gizmos.DrawSphere(_gizmoHitA, sewRadius);
+            if (!_isSelfSew) Gizmos.DrawSphere(_gizmoHitB, sewRadius);
+        }
     }
 }
