@@ -8458,10 +8458,19 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   sewer: {fileID: 6271176876846366318}
+  cuttingManager: {fileID: 0}
+  rayLength: 3
+  rayRadius: 0.05
+  showDebugRay: 1
   clothTag: Cloth
-  sewRadius: 0.05
-  maxCrossClothDistance: 0.15
-  sewCooldown: 0.5
+  weldThreshold: 0.01
+  sewRadius: 0.1
+  edgesPerFrame: 3
+  immediateWeld: 1
+  useSecondaryRayForSelfSew: 0
+  selfSewSearchRadius: 0.3
+  useAutoFinalize: 1
+  autoFinalizeDelay: 1.5
 --- !u!1 &684171625
 GameObject:
   m_ObjectHideFlags: 0
@@ -18465,7 +18474,7 @@ MonoBehaviour:
   m_EditorClassIdentifier: 
   cutter: {fileID: 1677894142041171170}
   checkInterval: 3
-  splitOnlyWhenDisconnected: 0
+  splitOnlyWhenDisconnected: 1
   splitForce: 1.5
   clothTag: Cloth
 --- !u!1 &1602418709
@@ -20297,6 +20306,65 @@ MeshFilter:
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 1740768636}
   m_Mesh: {fileID: 7629811779324647873, guid: daaea2b4c52d0ee4c8552a76dbf66991, type: 3}
+--- !u!1 &1788241885
+GameObject:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  serializedVersion: 6
+  m_Component:
+  - component: {fileID: 1788241887}
+  - component: {fileID: 1788241886}
+  m_Layer: 0
+  m_Name: Recenter
+  m_TagString: Untagged
+  m_Icon: {fileID: 0}
+  m_NavMeshLayer: 0
+  m_StaticEditorFlags: 0
+  m_IsActive: 1
+--- !u!114 &1788241886
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1788241885}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: fd6cf236c7ea57945b34fab28ee61b7c, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  head: {fileID: 1026268071}
+  origin: {fileID: 2073522704}
+  target: {fileID: 1788241887}
+  recenterButton:
+    m_UseReference: 1
+    m_Action:
+      m_Name: Recenter Button
+      m_Type: 0
+      m_ExpectedControlType: 
+      m_Id: 914f8825-8cae-442a-879c-6894278b326a
+      m_Processors: 
+      m_Interactions: 
+      m_SingletonActionBindings: []
+      m_Flags: 0
+    m_Reference: {fileID: 3478492405490273914, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+--- !u!4 &1788241887
+Transform:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 1788241885}
+  serializedVersion: 2
+  m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
+  m_LocalPosition: {x: 5.48, y: 1.0088, z: 2.61}
+  m_LocalScale: {x: 1, y: 1, z: 1}
+  m_ConstrainProportionsScale: 0
+  m_Children: []
+  m_Father: {fileID: 0}
+  m_LocalEulerAnglesHint: {x: 0, y: 0, z: 0}
 --- !u!1 &1789023497
 GameObject:
   m_ObjectHideFlags: 0
@@ -23175,8 +23243,8 @@ Transform:
   m_GameObject: {fileID: 2073522701}
   serializedVersion: 2
   m_LocalRotation: {x: 0, y: 0, z: 0, w: 1}
-  m_LocalPosition: {x: 5.48, y: 0.93, z: 0.5}
-  m_LocalScale: {x: 1.5808429, y: 1.5808429, z: 1.5808429}
+  m_LocalPosition: {x: 5.48, y: 1.0088, z: 2.61}
+  m_LocalScale: {x: 1.5389189, y: 1.5389189, z: 1.5389189}
   m_ConstrainProportionsScale: 0
   m_Children:
   - {fileID: 2013392078}
@@ -25537,3 +25605,4 @@ SceneRoots:
   - {fileID: 1643557199}
   - {fileID: 1157874951}
   - {fileID: 290029981}
+  - {fileID: 1788241887}

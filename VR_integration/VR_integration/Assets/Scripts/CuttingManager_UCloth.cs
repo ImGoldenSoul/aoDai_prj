@@ -85,7 +85,9 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         _cutters[obj] = null;
 
-        // Cache xem object này có UCCloth không, để xử lý bounds check đúng
+        // Cache xem object này có UCCloth không, để xử lý bounds check đúng.
+        // Gọi ngay tại đây để _ucClothObjects luôn đồng bộ trước khi coroutine chạy,
+        // tránh trường hợp LateUpdate chạy bounds check sai trong khi chờ InitCutter.
         if (obj.GetComponent<UCloth.UCCloth>() != null)
             _ucClothObjects.Add(obj);
 
@@ -106,6 +108,18 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (ucCloth.capsuleColliders == null) ucCloth.capsuleColliders = new CapsuleCollider[0];
             if (ucCloth.cubeColliders    == null) ucCloth.cubeColliders    = new BoxCollider[0];
             if (ucCloth.pinColliders     == null) ucCloth.pinColliders     = new System.Collections.Generic.List<Collider>();
+
+            // FIX Bug piece-không-cắt-tiếp-được:
+            // Piece mới được tạo runtime — UCCloth.Start() chưa chạy ngay khi
+            // coroutine này bắt đầu. Phải yield ít nhất 2 frame để Unity hoàn tất
+            // Awake() + Start() của UCCloth trước khi poll simData.
+            // Không yield đủ → simData luôn null → timeout → Initialize() không build
+            // được _renderToSimLookup → GetWorldSpaceVertices fallback TransformPoint
+            // → vị trí triangle sai với cloth đang bay → PerformCut() không bao giờ hit.
+            yield return null; // frame 1: Awake()
+            yield return null; // frame 2: Start()
+
+            if (obj == null) yield break;
 
             float timeout = 5f;
             while (timeout > 0f)
