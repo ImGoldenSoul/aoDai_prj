@@ -1,17 +1,39 @@
 // ============================================================
-//  MeshSewer_UCloth.cs  — v8.0
+//  MeshSewer_UCloth.cs  — v9.0
 //
-//  Giữ nguyên toàn bộ logic two-mesh từ v7 (đã hoạt động tốt).
-//  Sửa self-sew:
-//    v7 bug: chọn loop theo "centroid gần hitA nhất" rồi "loop xa nhất"
-//            → sai khi mesh có >2 loop hoặc layout phức tạp.
-//            Thêm nữa: _regionB = rỗng với self-sew nên cross-set
-//            matching bị skip hoàn toàn.
-//    v8 fix: Self-sew nhận hitPointA VÀ hitPointB riêng biệt (từ
-//            SewingManager bắn 2 SphereCast). Mỗi hitPoint tìm loop
-//            gần nhất độc lập → candA từ loopA, candB từ loopB.
-//            Cross-set matching chạy bình thường (vA != vB đủ điều kiện).
-//            Không cần _regionB với self-sew vì candA/candB đã tách biệt.
+//  [FIX-v9-1] TryCollapseToA: phát hiện internal edge conflict trong toRebuild.
+//          Vấn đề cũ: dry-run chỉ check edge với mesh hiện tại (FindEdge → InvalidID
+//          = bỏ qua), nhưng 2 triangle khác nhau trong cùng toRebuild có thể cùng
+//          tạo ra một edge mới → AppendTriangle thứ 2 bị reject (T-junction) → triangle
+//          bị xóa nhưng không rebuild → non-manifold hole. UCMeshPreprocessor sau đó
+//          crash với KeyNotFoundException: UCloth.UCTriangle vì dictionary edge→tri
+//          không nhất quán.
+//          Fix: dùng newEdgesInRebuild dictionary theo dõi mọi edge được toRebuild
+//          đăng ký. Nếu edge sắp tạo đã có (a) ≥2 slot, hoặc (b) 1 slot trong
+//          rebuild + 1 face ngoài → ABORT collapse.
+//
+//  [FIX-v9-2] Finalize: pass kiểm tra 2-manifold trước khi tạo UCCloth.
+//          Vấn đề cũ: mesh đầu ra vẫn có thể có T-junction do các collapse bị abort
+//          một phần → UCMeshPreprocessor.ConvertMeshData crash KeyNotFoundException.
+//          Fix: quét toàn bộ edge, nếu edge có > 2 face → xóa các face vi phạm →
+//          compact lại → UCCloth nhận mesh sạch 2-manifold.
+//
+//  [FIX-v9-3] FindSelfSewSecondaryHit: tìm đỉnh đối diện bằng centroid projection.
+//          Vấn đề cũ: 1-loop case dùng khoảng cách tuyệt đối (antiWeldRadius=sewRadius*1.5)
+//          → không tìm được đỉnh đối diện trên ống tay áo → trả về hitA → SewingManager
+//          gọi AddSeam(hitA, hitA) → candA ∩ candB = toàn bộ → tự khâu một điểm với
+//          chính nó → collapse đỉnh kề nhau → tạo degenerate face → topology vỡ.
+//          Fix: tính centroid boundary loop, dùng dot product để chọn đỉnh phía
+//          đối diện (dot nhỏ nhất = phía xa nhất từ centroid theo hướng của A).
+//
+//  [FIX-v9-4] SewingManager: guard hitA≈hitB trước AddSeam và Initialize.
+//          Vấn đề cũ: khi FindSelfSewSecondaryHit trả về hitA (không tìm được bestB),
+//          SewingManager vẫn gọi Initialize/AddSeam với seedA==seedB → candA và candB
+//          overlap hoàn toàn → tự collapse loop → topology vỡ dần.
+//          Fix: nếu Distance(hitA,hitB) < sewRadius*0.3f → bỏ qua frame đó.
+//
+//  Giữ nguyên từ v8.2:
+//  [FIX-TOPOLOGY-1/2/3], [BUG-1..4]
 // ============================================================
 using System.Collections.Generic;
 using System.Reflection;
@@ -43,6 +65,22 @@ public class MeshSewer_UCloth
     private MeshFilter _previewFilter;
     private MeshRenderer _previewRenderer;
 
+    // ── [FIX BUG-4] Public property cho SewingManager kiểm tra trước khi AddSeam ──
+    /// <summary>
+    /// true nếu mesh vẫn còn ít nhất một cạnh biên hở.
+    /// false nghĩa là mesh đã kín hoàn toàn — KHÔNG được AddSeam thêm nữa.
+    /// </summary>
+    public bool HasOpenBoundary
+    {
+        get
+        {
+            if (_combined == null) return false;
+            foreach (int eid in _combined.EdgeIndices())
+                if (_combined.IsBoundaryEdge(eid)) return true;
+            return false;
+        }
+    }
+
     // ── Constructor ───────────────────────────────────────────────────────
     public MeshSewer_UCloth(GameObject goA, GameObject goB,
                              float weldThreshold   = 0.05f,
@@ -58,12 +96,6 @@ public class MeshSewer_UCloth
     }
 
     // ── Initialize ────────────────────────────────────────────────────────
-    // hitPointA : điểm ray chạm vào cloth A (hoặc cạnh/loop thứ nhất khi self-sew)
-    // hitPointB : điểm ray chạm vào cloth B (hoặc cạnh/loop thứ hai khi self-sew)
-    //             Với two-mesh hitPointB có thể == hitPointA nếu chỉ có 1 điểm hit.
-    // =========================================================================
-    //  ── INITIALIZE (Bản nâng cấp v8.9 - Khắc phục hoàn toàn lỗi candA = 0) ──
-    // =========================================================================
     public bool Initialize(Vector3 hitPointA          = default,
                             Vector3 hitPointB          = default,
                             float   sewRadius          = 0.1f,
@@ -136,59 +168,47 @@ public class MeshSewer_UCloth
                 boundaryVerts.Add(ev.a); boundaryVerts.Add(ev.b);
             }
 
-            // Thử tìm đỉnh quanh cạnh biên hở trước
-            if (boundaryVerts.Count > 0)
+            // [FIX BUG-1/3] Mesh đã kín → không thể khâu thêm
+            if (boundaryVerts.Count == 0)
             {
-                foreach (int vid in boundaryVerts)
-                {
-                    Vector3d p = _combined.GetVertex(vid);
-                    if ((p - seedA).LengthSquared <= rSq) candA.Add(vid);
-                    if ((p - seedB).LengthSquared <= rSq) candB.Add(vid);
-                }
+                Debug.LogWarning("[MeshSewer] Initialize self-sew: Mesh đã kín hoàn toàn, không còn boundary edge.");
+                return false;
             }
 
-            // TOPO FALLBACK: Nếu người dùng khâu nếp gấp bề mặt trên mesh đã gộp vòng biên
+            foreach (int vid in boundaryVerts)
+            {
+                Vector3d p = _combined.GetVertex(vid);
+                if ((p - seedA).LengthSquared <= rSq) candA.Add(vid);
+                if ((p - seedB).LengthSquared <= rSq) candB.Add(vid);
+            }
+
+            // FALLBACK: chỉ khi vẫn còn boundary edge nhưng seed nằm ngoài radius
             if (candA.Count == 0)
-            {
-                candA = _combined.VertexIndices()
-                    .OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared)
-                    .Take(8).ToList();
-            }
+                candA = boundaryVerts.OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared).Take(8).ToList();
             if (candB.Count == 0)
-            {
-                candB = _combined.VertexIndices()
-                    .OrderBy(v => (_combined.GetVertex(v) - seedB).LengthSquared)
-                    .Take(8).ToList();
-            }
+                candB = boundaryVerts.OrderBy(v => (_combined.GetVertex(v) - seedB).LengthSquared).Take(8).ToList();
         }
         else
         {
             // ── NHÁNH 2: Xử lý Khâu gộp (Two-Mesh) ──
-            // Tìm kiếm đỉnh thuộc phân vùng Mesh A bám quanh điểm chạm laser A
             foreach (int vid in _regionA)
             {
                 Vector3d p = _combined.GetVertex(vid);
                 if ((p - seedA).LengthSquared <= rSq) candA.Add(vid);
             }
-            // Tìm kiếm đỉnh thuộc phân vùng Mesh B bám quanh điểm chạm laser B
             foreach (int vid in _regionB)
             {
                 Vector3d p = _combined.GetVertex(vid);
                 if ((p - seedB).LengthSquared <= rSq) candB.Add(vid);
             }
 
-            // FALLBACK CHO TWO-MESH: Đảm bảo không bị lỗi trắng ứng viên do sai lệch tọa độ tia cast VR
             if (candA.Count == 0 && _regionA.Count > 0)
-            {
                 candA = _regionA.OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared).Take(6).ToList();
-            }
             if (candB.Count == 0 && _regionB.Count > 0)
-            {
                 candB = _regionB.OrderBy(v => (_combined.GetVertex(v) - seedB).LengthSquared).Take(6).ToList();
-            }
         }
 
-        // CHỐNG TỰ SẬP: Loại bỏ triệt để việc đỉnh tự ghép cặp khâu với chính nó
+        // CHỐNG TỰ SẬP: Loại bỏ đỉnh tự ghép cặp khâu với chính nó
         var intersect = candA.Intersect(candB).ToList();
         if (intersect.Count > 0)
         {
@@ -264,14 +284,29 @@ public class MeshSewer_UCloth
         while (_pendingPairs.Count > 0 && count < MaxEdgesPerCall)
         {
             var (vA, vB) = _pendingPairs.Dequeue();
+
+            // [FIX-NaN-1] vA hoặc vB có thể đã bị remove bởi collapse trước trong batch
             if (!_combined.IsVertex(vA) || !_combined.IsVertex(vB)) continue;
-            if (vA == vB) { count++; continue; }
+            if (vA == vB) continue; // không tăng count vì không làm gì
 
-            // Snap vB → vA trong DMesh3
-            _combined.SetVertex(vB, _combined.GetVertex(vA));
+            // [FIX-NaN-2] Kiểm tra vị trí của vA trước khi dùng làm snap target
+            Vector3d posA = _combined.GetVertex(vA);
+            if (double.IsNaN(posA.x) || double.IsNaN(posA.y) || double.IsNaN(posA.z) ||
+                double.IsInfinity(posA.x) || double.IsInfinity(posA.y) || double.IsInfinity(posA.z))
+            {
+                Debug.LogWarning($"[MeshSewer] Sew: vA={vA} có position NaN/Inf, bỏ qua cặp này.");
+                count++;
+                continue;
+            }
 
-            // Weld topology: thay vB → vA trong tất cả triangle
-            TryCollapseToA(_combined, vA, vB);
+            // Snap vB → vA (lưu position cũ để revert nếu collapse thất bại)
+            Vector3d oldPosB = _combined.GetVertex(vB);
+            _combined.SetVertex(vB, posA);
+
+            // Weld topology — nếu thất bại, revert vB để tránh stale-snap loop
+            bool collapsed = TryCollapseToA(_combined, vA, vB);
+            if (!collapsed && _combined.IsVertex(vB))
+                _combined.SetVertex(vB, oldPosB);
             count++;
         }
 
@@ -279,232 +314,7 @@ public class MeshSewer_UCloth
         return _completed;
     }
 
-    // ── Finalize ─────────────────────────────────────────────────────────
-   // =========================================================================
-//  SỬA LỖI: HÀM FINALIZE NÂNG CẤP — FIX TRONG MESHSEWER_UCLOTH.CS
-// =========================================================================
-// =========================================================================
-    //  ── FINALIZE (Bản sửa lỗi CS0117 & CS1061 - Chuẩn hóa API gốc) ──
-    // =========================================================================
-    // =========================================================================
-    //  ── FINALIZE (Bản chuẩn hóa Local-Space đồng bộ hệ thống) ──
-    // =========================================================================
-    // =========================================================================
-    //  ── FINALIZE (Bản v9.0 - Chuẩn hóa Topology SubMesh & Fix KeyNotFound) ──
-    // =========================================================================
-    public GameObject Finalize(string newName = "SewnCloth")
-    {
-        if (!_initialized)
-        {
-            Debug.LogError("[MeshSewer] Gọi Finalize() trước Initialize()!");
-            return null;
-        }
-
-        // ── 0. Dọn sạch đối tượng xem trước đồ họa tạm thời ──
-        ClearPreviewVisuals();
-
-        // Nén chặt cấu trúc đỉnh và tam giác để dọn sạch các đỉnh cô lập thừa
-        DMesh3 compacted = new DMesh3(_combined, bCompact: true);
-
-        if (compacted.VertexCount > 65535)
-        {
-            Debug.LogError($"[MeshSewer] {compacted.VertexCount} verts > 65535 (Vượt giới hạn uCloth UShort)!");
-            return null;
-        }
-
-        // Tính toán hệ thống pháp tuyến sạch dựa trên cấu trúc hình học mới
-        MeshNormals.QuickCompute(compacted);
-
-        // ── 1. Khởi tạo GameObject mới & Kế thừa định danh cơ bản ──
-        var go = new GameObject(newName);
-        
-        // Đồng bộ vị trí thực thể vải mới trùng khớp hoàn toàn với vị trí thực tế của mảnh vải cũ lúc khâu
-        go.transform.SetPositionAndRotation(_goA.transform.position, _goA.transform.rotation);
-        go.transform.localScale = _goA.transform.localScale;
-
-        go.tag = _goA.tag; // Kế thừa tag "Cloth" để Sewing/Cutting nhận diện tiếp
-        go.layer = _goA.layer;
-
-        // ── 2. Tạo Mesh Unity sạch 100% không chứa dữ liệu rác SubMesh cũ ──
-        Mesh unityMesh = new Mesh();
-        unityMesh.name = newName + "_Mesh";
-
-        // Sử dụng cấu trúc danh sách tuần tự để trích xuất trực tiếp dữ liệu từ DMesh3 sang Local Space
-        var vertices = new List<Vector3>();
-        var triangles = new List<int>();
-        var g3ToRenderMap = new Dictionary<int, int>();
-
-        // Duyệt danh sách đỉnh và chuyển đổi chính xác về Local Space của GameObject mới tạo
-        foreach (int vid in compacted.VertexIndices())
-        {
-            Vector3d p = compacted.GetVertex(vid);
-            Vector3 worldPt = new Vector3((float)p.x, (float)p.y, (float)p.z);
-            Vector3 localPt = go.transform.InverseTransformPoint(worldPt);
-            
-            int newIdx = vertices.Count;
-            vertices.Add(localPt);
-            g3ToRenderMap[vid] = newIdx;
-        }
-
-        // Duyệt danh sách tam giác và map lại chỉ số liên tục sạch hoàn toàn
-        foreach (int tid in compacted.TriangleIndices())
-        {
-            if (!compacted.IsTriangle(tid)) continue;
-            Index3i tri = compacted.GetTriangle(tid);
-            
-            if (g3ToRenderMap.TryGetValue(tri.a, out int ia) &&
-                g3ToRenderMap.TryGetValue(tri.b, out int ib) &&
-                g3ToRenderMap.TryGetValue(tri.c, out int ic))
-            {
-                // Loại bỏ các tam giác suy biến (Degenerate Triangles) ngay tại tầng nạp mảng
-                if (ia == ib || ib == ic || ia == ic) continue;
-                
-                triangles.Add(ia);
-                triangles.Add(ib);
-                triangles.Add(ic);
-            }
-        }
-
-        // Cấu hình định dạng chỉ số đỉnh an toàn
-        unityMesh.indexFormat = vertices.Count > 65535 
-            ? UnityEngine.Rendering.IndexFormat.UInt32 
-            : UnityEngine.Rendering.IndexFormat.UInt16;
-
-        // Đẩy mảng dữ liệu nguyên bản, thuần khiết vào Mesh mới
-        unityMesh.SetVertices(vertices);
-        unityMesh.SetTriangles(triangles, 0);
-        
-        unityMesh.RecalculateNormals();
-        unityMesh.RecalculateBounds();
-        unityMesh.RecalculateTangents();
-
-        go.AddComponent<MeshFilter>().mesh = unityMesh;
-
-        var mr = go.AddComponent<MeshRenderer>();
-        mr.sharedMaterials = _goA.GetComponent<MeshRenderer>()?.sharedMaterials ?? new Material[0];
-
-        // Gán MeshCollider phẳng (convex = false) tương thích vải
-        var mc = go.AddComponent<MeshCollider>();
-        mc.sharedMesh = unityMesh;
-        mc.convex     = false;
-
-        var rb = go.AddComponent<Rigidbody>();
-        rb.useGravity  = true;
-        rb.isKinematic = true;
-
-        // ── 3. Thiết lập thông số và Kích hoạt vòng đời tự nhiên cho UCCloth ──
-        //
-        // FIX BUG KHÂU-XONG-KHÔNG-CẮT-ĐƯỢC (root cause):
-        // AddComponent<UCCloth>() kích hoạt UCCloth.Awake() đồng bộ ngay trong frame này.
-        // Nếu gán sphereColliders / cubeColliders / pinColliders SAU AddComponent,
-        // UCCloth.Awake() đọc các array đó khi chúng còn null → FilterColliders() crash
-        // hoặc simData không được khởi tạo → timeout → _renderToSimLookup = null
-        // → GetWorldSpaceVertices fallback TransformPoint sai vị trí → không cắt được.
-        //
-        // Giải pháp: tắt GameObject TRƯỚC khi AddComponent → Awake() bị hoãn lại,
-        // gán đầy đủ tất cả properties, rồi bật lại → UCCloth.Awake()/Start() chạy
-        // với dữ liệu hoàn chỉnh.
-        var ucBase = _ucA ?? _ucB;
-        if (ucBase != null)
-        {
-            go.SetActive(false); // Tắt tạm để UCCloth.Awake() không chạy sớm
-
-            var newCloth = go.AddComponent<UCloth.UCCloth>();
-
-            // Copy thông số vật liệu vải
-            newCloth.preprocessorType     = ucBase.preprocessorType;
-            newCloth.materialProperties   = ucBase.materialProperties;
-            newCloth.simulationProperties = ucBase.simulationProperties;
-            newCloth.qualityProperties    = ucBase.qualityProperties;
-            newCloth.collisionProperties  = ucBase.collisionProperties;
-            newCloth.thickness            = ucBase.thickness;
-            newCloth.offsetFront          = ucBase.offsetFront;
-            newCloth.smoothing            = ucBase.smoothing;
-
-            // Gộp mảng các Collider va chạm môi trường (Null-safe).
-            // Phải set TRƯỚC khi go.SetActive(true) để UCCloth.Awake() đọc đúng giá trị.
-            // Truyền excludeGoA/GoB để loại bỏ collider thuộc mesh gốc (sẽ bị deactivate)
-            newCloth.sphereColliders  = MergeColliderArrays(_ucA?.sphereColliders,  _isSelfSew ? null : _ucB?.sphereColliders,  _goA, _isSelfSew ? null : _goB);
-            newCloth.capsuleColliders = MergeColliderArrays(_ucA?.capsuleColliders, _isSelfSew ? null : _ucB?.capsuleColliders, _goA, _isSelfSew ? null : _goB);
-            newCloth.cubeColliders    = MergeColliderArrays(_ucA?.cubeColliders,    _isSelfSew ? null : _ucB?.cubeColliders,    _goA, _isSelfSew ? null : _goB);
-
-            // Đảm bảo không null để UCCloth.FilterColliders() không crash
-            if (newCloth.sphereColliders  == null) newCloth.sphereColliders  = new SphereCollider[0];
-            if (newCloth.capsuleColliders == null) newCloth.capsuleColliders = new CapsuleCollider[0];
-            if (newCloth.cubeColliders    == null) newCloth.cubeColliders    = new BoxCollider[0];
-
-            // Gộp mảng điểm ghim vải cố định (Pin).
-            // Chỉ giữ pin collider KHÔNG thuộc goA/goB (vì chúng sẽ bị deactivate).
-            var mergedPins = new List<Collider>();
-            foreach (var src in new[] { _ucA?.pinColliders, _isSelfSew ? null : _ucB?.pinColliders })
-            {
-                if (src == null) continue;
-                foreach (var c in src)
-                {
-                    if ((UnityEngine.Object)c == null) continue;
-                    if (c.transform.IsChildOf(_goA.transform)) continue;
-                    if (!_isSelfSew && _goB != null && c.transform.IsChildOf(_goB.transform)) continue;
-                    if (!mergedPins.Contains(c)) mergedPins.Add(c);
-                }
-            }
-            newCloth.pinColliders = mergedPins;
-
-            go.SetActive(true); // Bật lại → UCCloth.Awake()+Start() chạy với data đầy đủ
-            Debug.Log($"[MeshSewer] Thuộc tính vật lý cho '{newName}' đã đồng bộ. UCCloth sẽ init với data đầy đủ.");
-        }
-
-        // ── 4. Đồng bộ hóa bộ tương tác Grab VR (Meta Quest) ──
-        var grabSrc = _goA.GetComponent<UClothLaserGrabber>() 
-                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber>());
-        if (grabSrc != null)
-        {
-            var gr = go.AddComponent<UClothLaserGrabber>();
-            gr.vrController  = grabSrc.vrController;
-            gr.grabSphere    = grabSrc.grabSphere;
-            gr.triggerAction = grabSrc.triggerAction;
-            gr.pullForce     = grabSrc.pullForce;
-            Debug.Log($"[MeshSewer] Kế thừa bộ tương tác VR Laser Grabber cho {newName} thành công.");
-        }
-
-        // ── 5. Giải phóng và tắt bỏ các Mesh cũ để tránh rò rỉ bộ nhớ Native ──
-        SafeDisableUCloth(_goA);
-        if (!_isSelfSew && _goB != null) SafeDisableUCloth(_goB);
-
-        Debug.Log($"<color=green>[MeshSewer] ✓ Xuất bản vải Local-Space thành công:</color> '{newName}' ({unityMesh.vertexCount} verts).");
-
-        OnSeamCompleted?.Invoke(go);
-        return go;
-    }
-
-    // Hàm hỗ trợ gộp mảng Collider null-safe, tránh trùng lặp phần tử.
-    // QUAN TRỌNG: Chỉ giữ lại collider KHÔNG thuộc goA/goB (tức environment colliders
-    // như sàn, bàn...) vì goA/goB sẽ bị SetActive(false) ngay sau Finalize().
-    // Collider thuộc goA/goB sẽ bị deactivate → UCCloth.UpdateColliderDTOs() crash.
-    private static T[] MergeColliderArrays<T>(T[] arrayA, T[] arrayB,
-        GameObject excludeGoA = null, GameObject excludeGoB = null) where T : Collider
-    {
-        var list = new List<T>();
-        foreach (var arr in new[] { arrayA, arrayB })
-        {
-            if (arr == null) continue;
-            foreach (var c in arr)
-            {
-                // Unity fake-null check: destroyed/deactivated object == null trong Unity
-                if ((UnityEngine.Object)c == null) continue;
-                // Loại bỏ collider thuộc goA/goB vì chúng sẽ bị SetActive(false)
-                if (excludeGoA != null && c.gameObject == excludeGoA) continue;
-                if (excludeGoB != null && c.gameObject == excludeGoB) continue;
-                // Loại bỏ collider thuộc GO con của goA/goB
-                if (excludeGoA != null && c.transform.IsChildOf(excludeGoA.transform)) continue;
-                if (excludeGoB != null && c.transform.IsChildOf(excludeGoB.transform)) continue;
-                if (!list.Contains(c)) list.Add(c);
-            }
-        }
-        return list.ToArray();
-    }
-
-
-    // ── AddSeam (v8.2 - Robust Spatial Search for Continuous Sewing) ───────────────────
+    // ── AddSeam (v8.2 Fix - Topology-safe, closed-mesh guard) ──────────────────
     public bool AddSeam(Vector3 hitPointA, Vector3 hitPointB, float sewRadius)
     {
         if (!_initialized)
@@ -513,7 +323,7 @@ public class MeshSewer_UCloth
             return false;
         }
 
-        // 1. Thu thập tất cả boundary vertex hiện có trong mesh tổng hợp
+        // 1. Thu thập tất cả boundary vertex hiện có
         var boundaryVerts = new HashSet<int>();
         foreach (int eid in _combined.EdgeIndices())
         {
@@ -523,50 +333,65 @@ public class MeshSewer_UCloth
             boundaryVerts.Add(ev.b);
         }
 
+        // [FIX BUG-1] Hard stop: mesh đã kín hoàn toàn → không fallback, không khâu thêm
         if (boundaryVerts.Count == 0)
         {
-            Debug.LogWarning("[MeshSewer] AddSeam: Không còn cạnh biên trống nào để khâu (Mesh đã kín).");
+            Debug.LogWarning("[MeshSewer] AddSeam: Mesh đã kín hoàn toàn — không còn cạnh biên hở. " +
+                             "Hãy gọi Finalize() để hoàn tất.");
             return false;
         }
 
         Vector3d seedA = ToV3d(hitPointA);
         Vector3d seedB = ToV3d(hitPointB);
-        
-        // Mở rộng bán kính tìm kiếm đỉnh một chút để bù đắp sai số co giãn vật lý của uCloth
+
         double dynamicRadius = System.Math.Max((double)sewRadius, Vector3.Distance(hitPointA, hitPointB) * 0.5);
         double rSq = dynamicRadius * dynamicRadius;
 
         var candA = new List<int>();
         var candB = new List<int>();
 
-        // 2. Thu thập ứng viên thuần túy theo khoảng cách không gian (Spatial Search)
-        // Cách này loại bỏ hoàn toàn sự phụ thuộc vào thứ tự/số lượng Loop biên bị biến dạng
+        // 2. Tìm ứng viên chỉ trong tập boundary (KHÔNG lấy vertex nội thất)
+        // [FIX-NaN-7] Bỏ qua vertex có position không hợp lệ
         foreach (int vid in boundaryVerts)
         {
+            if (!_combined.IsVertex(vid)) continue; // vertex đã bị remove bởi collapse trước
             Vector3d p = _combined.GetVertex(vid);
-            
+            if (double.IsNaN(p.x) || double.IsNaN(p.y) || double.IsNaN(p.z) ||
+                double.IsInfinity(p.x) || double.IsInfinity(p.y) || double.IsInfinity(p.z))
+                continue; // zombie position
+
             double distSqA = (p - seedA).LengthSquared;
             double distSqB = (p - seedB).LengthSquared;
-
             if (distSqA <= rSq) candA.Add(vid);
             if (distSqB <= rSq) candB.Add(vid);
         }
 
-        // Fallback bảo toàn: Nếu bán kính quét không đủ, lấy N đỉnh biên gần các điểm hit nhất
-        if (candA.Count == 0 && boundaryVerts.Count > 0)
+        // [FIX BUG-2] Fallback: KHÔNG dùng cached boundaryVerts — re-query fresh để đảm bảo
+        // đồng bộ sau các Sew()/collapse đã chạy trước đó trong cùng frame.
+        // Cached list có thể chứa vertex đã bị remove hoặc không còn là boundary nữa.
+        if (candA.Count == 0 || candB.Count == 0)
         {
-            candA = boundaryVerts
-                .OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared)
-                .Take(5).ToList();
-        }
-        if (candB.Count == 0 && boundaryVerts.Count > 0)
-        {
-            candB = boundaryVerts
-                .OrderBy(v => (_combined.GetVertex(v) - seedB).LengthSquared)
-                .Take(5).ToList();
+            var freshBoundaryVerts = new HashSet<int>();
+            foreach (int eid in _combined.EdgeIndices())
+            {
+                if (!_combined.IsBoundaryEdge(eid)) continue;
+                Index2i ev = _combined.GetEdgeV(eid);
+                freshBoundaryVerts.Add(ev.a);
+                freshBoundaryVerts.Add(ev.b);
+            }
+            var validFresh = freshBoundaryVerts
+                .Where(v => _combined.IsVertex(v))
+                .Where(v => { Vector3d p = _combined.GetVertex(v);
+                              return !double.IsNaN(p.x) && !double.IsInfinity(p.x); })
+                .ToList();
+
+            if (candA.Count == 0)
+                candA = validFresh.OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared).Take(5).ToList();
+            if (candB.Count == 0)
+                candB = validFresh.OrderBy(v => (_combined.GetVertex(v) - seedB).LengthSquared).Take(5).ToList();
         }
 
-        // Loại bỏ các đỉnh trùng lặp chéo giữa 2 tập để tránh đỉnh tự khâu với chính nó
+        // Loại bỏ đỉnh trùng chéo
         if (candA.Count > 0 && candB.Count > 0)
         {
             var intersect = candA.Intersect(candB).ToList();
@@ -574,7 +399,6 @@ public class MeshSewer_UCloth
             {
                 foreach (int v in intersect)
                 {
-                    // Đỉnh nào gần bên nào hơn thì giữ lại bên đó
                     double dA = (_combined.GetVertex(v) - seedA).LengthSquared;
                     double dB = (_combined.GetVertex(v) - seedB).LengthSquared;
                     if (dA < dB) candB.Remove(v); else candA.Remove(v);
@@ -584,11 +408,11 @@ public class MeshSewer_UCloth
 
         if (candA.Count == 0 || candB.Count == 0)
         {
-            Debug.LogWarning($"[MeshSewer] AddSeam thất bại hình học: candA={candA.Count}, candB={candB.Count}. Thử điều chỉnh góc bắn raycast.");
+            Debug.LogWarning($"[MeshSewer] AddSeam thất bại: candA={candA.Count}, candB={candB.Count}.");
             return false;
         }
 
-        // 3. Cross-set matching (Giữ nguyên logic gốc ổn định của bạn)
+        // 3. Cross-set matching
         double actualMinDist = double.MaxValue;
         foreach (int vA in candA)
         {
@@ -627,31 +451,529 @@ public class MeshSewer_UCloth
 
         if (added == 0)
         {
-            // Cứu cánh cuối cùng: Ép cặp thủ công đỉnh gần nhất của tập A và B nếu phân mảnh hash grid thất bại
             int bestVA = candA.OrderBy(v => (_combined.GetVertex(v) - seedA).LengthSquared).First();
-            int bestVB = candB.Where(v => v != bestVA).OrderBy(v => (_combined.GetVertex(v) - _combined.GetVertex(bestVA)).LengthSquared).FirstOrDefault();
-            if (bestVB != 0)
+            int bestVB = candB.Where(v => v != bestVA)
+                              .OrderBy(v => (_combined.GetVertex(v) - _combined.GetVertex(bestVA)).LengthSquared)
+                              .FirstOrDefault();
+            if (bestVB != 0 && bestVB != bestVA)
             {
                 _pendingPairs.Enqueue((bestVA, bestVB));
                 added++;
             }
         }
 
-        _completed = false; // Kích hoạt lại tiến trình cho hàm Sew() chạy ở frame tiếp theo
-        Debug.Log($"[MeshSewer] AddSeam khâu nối thành công: +{added} cặp đỉnh biên mới (candA:{candA.Count}, candB:{candB.Count})");
+        _completed = false;
+        Debug.Log($"[MeshSewer] AddSeam: +{added} cặp (candA:{candA.Count}, candB:{candB.Count}, boundary:{boundaryVerts.Count})");
         return added > 0;
+    }
+
+    // ── Finalize ─────────────────────────────────────────────────────────
+    public GameObject Finalize(string newName = "SewnCloth")
+    {
+        if (!_initialized)
+        {
+            Debug.LogError("[MeshSewer] Gọi Finalize() trước Initialize()!");
+            return null;
+        }
+
+        ClearPreviewVisuals();
+
+        // ── 0. Flush mọi pending pair còn lại (nếu Finalize được gọi sớm) ──
+        while (_pendingPairs.Count > 0)
+        {
+            var (vA, vB) = _pendingPairs.Dequeue();
+            if (!_combined.IsVertex(vA) || !_combined.IsVertex(vB)) continue;
+            if (vA == vB) continue;
+            Vector3d posA = _combined.GetVertex(vA);
+            if (double.IsNaN(posA.x) || double.IsInfinity(posA.x)) continue;
+            _combined.SetVertex(vB, posA);
+            TryCollapseToA(_combined, vA, vB);
+        }
+
+        // ── 1. Compact dữ liệu ban đầu ──
+        DMesh3 compacted = new DMesh3(_combined, bCompact: true);
+
+        // ── 2. BIỆN PHÁP MẠNH [FIX-v9-6]: SANITIZE TOPO TUYỆT ĐỐI CHO UCLOTH ──
+        
+        // Bước A: Loại bỏ tam giác Suy biến (Degenerate) & chứa NaN/Inf
+        var badTris = new List<int>();
+        foreach (int tid in compacted.TriangleIndices())
+        {
+            if (!compacted.IsTriangle(tid)) continue;
+            Index3i tri = compacted.GetTriangle(tid);
+            
+            // Check đỉnh hợp lệ
+            if (!compacted.IsVertex(tri.a) || !compacted.IsVertex(tri.b) || !compacted.IsVertex(tri.c) ||
+                tri.a == tri.b || tri.b == tri.c || tri.a == tri.c)
+            {
+                badTris.Add(tid);
+                continue;
+            }
+
+            // Check vị trí NaN/Inf
+            Vector3d pA = compacted.GetVertex(tri.a);
+            Vector3d pB = compacted.GetVertex(tri.b);
+            Vector3d pC = compacted.GetVertex(tri.c);
+            if (double.IsNaN(pA.x) || double.IsNaN(pB.x) || double.IsNaN(pC.x) ||
+                double.IsInfinity(pA.x) || double.IsInfinity(pB.x) || double.IsInfinity(pC.x))
+            {
+                badTris.Add(tid);
+                continue;
+            }
+
+            // Check diện tích tam giác quá nhỏ (nguyên nhân gây crash toán giải tích trong uCloth)
+            double area = MathUtil.Area(pA, pB, pC);
+            if (area < 1e-7) 
+            {
+                badTris.Add(tid);
+            }
+        }
+        
+        if (badTris.Count > 0)
+        {
+            Debug.LogWarning($"[MeshSewer] Finalize: Loại bỏ {badTris.Count} tam giác suy biến/NaN/diện tích siêu nhỏ.");
+            foreach (int tid in badTris)
+                compacted.RemoveTriangle(tid, false, false);
+            compacted = new DMesh3(compacted, bCompact: true);
+        }
+
+        // Bước B: Xử lý Non-Manifold Edges và Trùng lặp hướng cạnh (Cực kỳ quan trọng cho uCloth)
+        {
+            var edgeRegistry = new Dictionary<(int, int), List<(int tid, bool forward)>>();
+            foreach (int tid in compacted.TriangleIndices())
+            {
+                if (!compacted.IsTriangle(tid)) continue;
+                Index3i tri = compacted.GetTriangle(tid);
+
+                // Định nghĩa 3 cặp cạnh có hướng chuẩn của tam giác này
+                var edgesList = new[] {
+                    (tri.a, tri.b),
+                    (tri.b, tri.c),
+                    (tri.c, tri.a)
+                };
+
+                foreach (var (v0, v1) in edgesList)
+                {
+                    var key = v0 < v1 ? (v0, v1) : (v1, v0);
+                    bool isForward = v0 < v1;
+
+                    if (!edgeRegistry.ContainsKey(key)) edgeRegistry[key] = new List<(int, bool)>();
+                    edgeRegistry[key].Add((tid, isForward));
+                }
+            }
+
+            var trisToDestroy = new HashSet<int>();
+            foreach (var kv in edgeRegistry)
+            {
+                var sharedList = kv.Value;
+                
+                // Trường hợp 1: T-Junction vật lý (> 2 tam giác chung cạnh)
+                if (sharedList.Count > 2)
+                {
+                    foreach (var item in sharedList) trisToDestroy.Add(item.tid);
+                }
+                // Trường hợp 2: Đúng 2 tam giác chung cạnh nhưng trùng Winding chuẩn (Cả hai cùng xuôi hoặc cùng ngược)
+                else if (sharedList.Count == 2)
+                {
+                    if (sharedList[0].forward == sharedList[1].forward)
+                    {
+                        // Xung đột hướng nghiêm trọng! Hủy tam giác thứ hai để giữ an toàn cho uCloth Preprocessor
+                        trisToDestroy.Add(sharedList[1].tid);
+                    }
+                }
+            }
+
+            if (trisToDestroy.Count > 0)
+            {
+                Debug.LogWarning($"[MeshSewer] Finalize: Hủy {trisToDestroy.Count} tam giác gây xung đột topo/Winding trùng.");
+                foreach (int tid in trisToDestroy)
+                    if (compacted.IsTriangle(tid)) compacted.RemoveTriangle(tid, false, false);
+                compacted = new DMesh3(compacted, bCompact: true);
+            }
+        }
+
+        // Bước C: Sửa Winding Order nhất quán bằng Flood-fill an toàn
+        {
+            bool orientationChanged = false;
+            var visitedTris = new HashSet<int>();
+            var componentLists = new List<List<int>>();
+
+            foreach (int startTid in compacted.TriangleIndices())
+            {
+                if (!compacted.IsTriangle(startTid) || visitedTris.Contains(startTid)) continue;
+
+                var currentComponent = new List<int>();
+                var queue = new Queue<int>();
+                
+                queue.Enqueue(startTid);
+                visitedTris.Add(startTid);
+                currentComponent.Add(startTid);
+
+                while (queue.Count > 0)
+                {
+                    int curTid = queue.Dequeue();
+                    Index3i curTri = compacted.GetTriangle(curTid);
+
+                    Index3i triEdges = compacted.GetTriEdges(curTid);
+                    int[] edges = new int[3] { triEdges.a, triEdges.b, triEdges.c };
+
+                    foreach (int eid in edges)
+                    {
+                        if (eid == DMesh3.InvalidID) continue;
+
+                        Index2i edgeTris = compacted.GetEdgeT(eid);
+                        int neighborTid = (edgeTris.a == curTid) ? edgeTris.b : edgeTris.a;
+
+                        if (neighborTid == DMesh3.InvalidID || visitedTris.Contains(neighborTid)) continue;
+                        if (!compacted.IsTriangle(neighborTid)) continue;
+
+                        Index3i nTri = compacted.GetTriangle(neighborTid);
+                        
+                        if (IsWindingInconsistent(curTri, nTri))
+                        {
+                            compacted.SetTriangle(neighborTid, new Index3i(nTri.a, nTri.c, nTri.b));
+                            orientationChanged = true;
+                        }
+
+                        visitedTris.Add(neighborTid);
+                        queue.Enqueue(neighborTid);
+                        currentComponent.Add(neighborTid);
+                    }
+                }
+                componentLists.Add(currentComponent);
+            }
+
+            // Bước D: Ép thể tích dương (Global Orientation)
+            foreach (var component in componentLists)
+            {
+                if (component.Count == 0) continue;
+
+                double totalSignedVolume = 0;
+                foreach (int tid in component)
+                {
+                    Index3i tri = compacted.GetTriangle(tid);
+                    Vector3d vA = compacted.GetVertex(tri.a);
+                    Vector3d vB = compacted.GetVertex(tri.b);
+                    Vector3d vC = compacted.GetVertex(tri.c);
+                    totalSignedVolume += vA.Dot(vB.Cross(vC)) / 6.0;
+                }
+
+                if (totalSignedVolume < 0)
+                {
+                    foreach (int tid in component)
+                    {
+                        Index3i tri = compacted.GetTriangle(tid);
+                        compacted.SetTriangle(tid, new Index3i(tri.a, tri.c, tri.b));
+                    }
+                    orientationChanged = true;
+                }
+            }
+
+            if (orientationChanged)
+                Debug.Log("[MeshSewer] Finalize: Đã tối ưu hóa và đồng bộ Winding Order.");
+        }
+
+        // Dọn dẹp isolated vertex sinh ra sau khi lọc bỏ tam giác lỗi
+        var isolatedVerts = new List<int>();
+        foreach (int vid in compacted.VertexIndices())
+        {
+            if (!compacted.IsVertex(vid)) continue;
+            if (compacted.GetVtxTriangleCount(vid) == 0)
+                isolatedVerts.Add(vid);
+        }
+        if (isolatedVerts.Count > 0)
+        {
+            foreach (int vid in isolatedVerts)
+                compacted.RemoveVertex(vid, true, false);
+            compacted = new DMesh3(compacted, bCompact: true);
+        }
+
+        if (compacted.VertexCount == 0 || compacted.TriangleCount == 0)
+        {
+            Debug.LogError("[MeshSewer] Finalize: Mesh trống sau bước lọc nghiêm ngặt — hủy.");
+            return null;
+        }
+
+        if (compacted.VertexCount > 65535)
+        {
+            Debug.LogError($"[MeshSewer] {compacted.VertexCount} verts > 65535 (Vượt giới hạn uCloth UShort)!");
+            return null;
+        }
+
+        MeshNormals.QuickCompute(compacted);
+
+        // ── 3. Khởi tạo Unity GameObject và Mesh ──
+        var go = new GameObject(newName);
+        go.transform.SetPositionAndRotation(_goA.transform.position, _goA.transform.rotation);
+        go.transform.localScale = _goA.transform.localScale;
+        go.tag   = _goA.tag;
+        go.layer = _goA.layer;
+
+        Mesh unityMesh = new Mesh();
+        unityMesh.name = newName + "_Mesh";
+
+        var vertices  = new List<Vector3>();
+        var triangles = new List<int>();
+        var g3ToRenderMap = new Dictionary<int, int>();
+
+        foreach (int vid in compacted.VertexIndices())
+        {
+            Vector3d p       = compacted.GetVertex(vid);
+            Vector3 worldPt  = new Vector3((float)p.x, (float)p.y, (float)p.z);
+            Vector3 localPt  = go.transform.InverseTransformPoint(worldPt);
+            int newIdx       = vertices.Count;
+            vertices.Add(localPt);
+            g3ToRenderMap[vid] = newIdx;
+        }
+
+        foreach (int tid in compacted.TriangleIndices())
+        {
+            if (!compacted.IsTriangle(tid)) continue;
+            Index3i tri = compacted.GetTriangle(tid);
+            if (g3ToRenderMap.TryGetValue(tri.a, out int ia) &&
+                g3ToRenderMap.TryGetValue(tri.b, out int ib) &&
+                g3ToRenderMap.TryGetValue(tri.c, out int ic))
+            {
+                if (ia == ib || ib == ic || ia == ic) continue;
+                triangles.Add(ia); triangles.Add(ib); triangles.Add(ic);
+            }
+        }
+
+        // Kiểm tra an toàn NaN/Inf cuối
+        for (int i = 0; i < vertices.Count; i++)
+        {
+            Vector3 v = vertices[i];
+            if (float.IsNaN(v.x) || float.IsNaN(v.y) || float.IsNaN(v.z) ||
+                float.IsInfinity(v.x) || float.IsInfinity(v.y) || float.IsInfinity(v.z))
+            {
+                Debug.LogError($"[MeshSewer] Finalize ABORT: vertex[{i}]={v} vẫn còn NaN/Inf. Hủy.");
+                Object.Destroy(go);
+                return null;
+            }
+        }
+
+        unityMesh.indexFormat = vertices.Count > 65535
+            ? UnityEngine.Rendering.IndexFormat.UInt32
+            : UnityEngine.Rendering.IndexFormat.UInt16;
+
+        unityMesh.SetVertices(vertices);
+        unityMesh.SetTriangles(triangles, 0);
+        unityMesh.RecalculateNormals();
+        unityMesh.RecalculateBounds();
+        unityMesh.RecalculateTangents();
+
+        go.AddComponent<MeshFilter>().mesh = unityMesh;
+
+        var mr = go.AddComponent<MeshRenderer>();
+        mr.sharedMaterials = _goA.GetComponent<MeshRenderer>()?.sharedMaterials ?? new Material[0];
+
+        var mc = go.AddComponent<MeshCollider>();
+        mc.sharedMesh = unityMesh;
+        mc.convex     = false;
+
+        var rb = go.AddComponent<Rigidbody>();
+        rb.useGravity  = true;
+        rb.isKinematic = true;
+
+        // ── 4. Đồng bộ cấu hình dữ liệu UCCloth vật lý ──
+        var ucBase = _ucA ?? _ucB;
+        if (ucBase != null)
+        {
+            go.SetActive(false);
+
+            var newCloth = go.AddComponent<UCloth.UCCloth>();
+            newCloth.preprocessorType     = ucBase.preprocessorType;
+            newCloth.materialProperties   = ucBase.materialProperties;
+            newCloth.simulationProperties = ucBase.simulationProperties;
+            newCloth.qualityProperties    = ucBase.qualityProperties;
+            newCloth.collisionProperties  = ucBase.collisionProperties;
+            newCloth.thickness            = ucBase.thickness;
+            newCloth.offsetFront          = ucBase.offsetFront;
+            newCloth.smoothing            = ucBase.smoothing;
+
+            newCloth.sphereColliders  = MergeColliderArrays(_ucA?.sphereColliders,  _isSelfSew ? null : _ucB?.sphereColliders,  _goA, _isSelfSew ? null : _goB);
+            newCloth.capsuleColliders = MergeColliderArrays(_ucA?.capsuleColliders, _isSelfSew ? null : _ucB?.capsuleColliders, _goA, _isSelfSew ? null : _goB);
+            newCloth.cubeColliders    = MergeColliderArrays(_ucA?.cubeColliders,    _isSelfSew ? null : _ucB?.cubeColliders,    _goA, _isSelfSew ? null : _goB);
+
+            if (newCloth.sphereColliders  == null) newCloth.sphereColliders  = new SphereCollider[0];
+            if (newCloth.capsuleColliders == null) newCloth.capsuleColliders = new CapsuleCollider[0];
+            if (newCloth.cubeColliders    == null) newCloth.cubeColliders    = new BoxCollider[0];
+
+            var mergedPins = new List<Collider>();
+            foreach (var src in new[] { _ucA?.pinColliders, _isSelfSew ? null : _ucB?.pinColliders })
+            {
+                if (src == null) continue;
+                foreach (var c in src)
+                {
+                    if ((UnityEngine.Object)c == null) continue;
+                    if (c.transform.IsChildOf(_goA.transform)) continue;
+                    if (!_isSelfSew && _goB != null && c.transform.IsChildOf(_goB.transform)) continue;
+                    if (!mergedPins.Contains(c)) mergedPins.Add(c);
+                }
+            }
+            newCloth.pinColliders = mergedPins;
+
+            go.SetActive(true);
+            Debug.Log($"[MeshSewer] UCCloth đã đồng bộ cho '{newName}'.");
+        }
+
+        // ── 5. Khôi phục tương tác Laser Grabber trong VR ──
+        var grabSrc = _goA.GetComponent<UClothLaserGrabber>()
+                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber>());
+        if (grabSrc != null)
+        {
+            var gr = go.AddComponent<UClothLaserGrabber>();
+            gr.vrController  = grabSrc.vrController;
+            gr.grabSphere    = grabSrc.grabSphere;
+            gr.triggerAction = grabSrc.triggerAction;
+            gr.pullForce     = grabSrc.pullForce;
+        }
+
+        SafeDisableUCloth(_goA);
+        if (!_isSelfSew && _goB != null) SafeDisableUCloth(_goB);
+
+        Debug.Log($"<color=green>[MeshSewer] ✓ Finalize thành công:</color> '{newName}' ({unityMesh.vertexCount} verts).");
+
+        OnSeamCompleted?.Invoke(go);
+        return go;
+    }
+
+    // ── FindSelfSewSecondaryHit (Fix BUG-3: sleeve / 1-loop case) ────────
+    /// <summary>
+    /// Tìm điểm B trên mesh tự khâu để khâu với điểm A.
+    /// [FIX BUG-3] Khi chỉ còn 1 boundary loop (ống tay áo gần kín),
+    /// tìm đỉnh đủ xa trên CÙNG loop thay vì trả về hitA.
+    /// </summary>
+    public static Vector3 FindSelfSewSecondaryHit(
+        GameObject go, Vector3 hitA, float sewRadius,
+        bool useSecondaryRay = true, float searchRadius = 0.3f)
+    {
+        if (!useSecondaryRay) return hitA;
+
+        var mf = go.GetComponent<MeshFilter>();
+        if (mf == null) return hitA;
+
+        Mesh      mesh  = mf.mesh;
+        Vector3[] verts = mesh.vertices;
+        int[]     tris  = mesh.triangles;
+        Transform tf    = go.transform;
+
+        // Xây boundary adjacency
+        var edgeCount = new Dictionary<(int, int), int>();
+        for (int t = 0; t < tris.Length; t += 3)
+        {
+            int a = tris[t], b = tris[t + 1], c = tris[t + 2];
+            AddEdge(edgeCount, a, b); AddEdge(edgeCount, b, c); AddEdge(edgeCount, a, c);
+        }
+
+        var boundarySet = new HashSet<int>();
+        foreach (var kv in edgeCount)
+            if (kv.Value == 1) { boundarySet.Add(kv.Key.Item1); boundarySet.Add(kv.Key.Item2); }
+
+        if (boundarySet.Count == 0)
+        {
+            // Mesh hoàn toàn kín — báo rõ, không tự khâu
+            Debug.LogWarning("[MeshSewer] FindSelfSewSecondaryHit: Mesh đã kín, không còn boundary vertex.");
+            return hitA; // caller phải kiểm tra HasOpenBoundary trước khi dùng kết quả này
+        }
+
+        // Build world pos
+        var bWorldPos = new Dictionary<int, Vector3>();
+        foreach (int v in boundarySet)
+            if (v >= 0 && v < verts.Length)
+                bWorldPos[v] = tf.TransformPoint(verts[v]);
+
+        if (bWorldPos.Count == 0) return hitA;
+
+        // Tìm đỉnh gần hitA nhất (nearestToA)
+        int   nearestToA  = -1;
+        float nearestDist = float.MaxValue;
+        foreach (var kv in bWorldPos)
+        {
+            float d = Vector3.Distance(kv.Value, hitA);
+            if (d < nearestDist) { nearestDist = d; nearestToA = kv.Key; }
+        }
+        if (nearestToA < 0) return hitA;
+
+        // Build boundary loop adjacency và flood-fill loop của A
+        var adjBoundary = BuildBoundaryAdjacency(edgeCount, boundarySet);
+        var compA       = FloodFill(nearestToA, adjBoundary);
+
+        // Thử tìm bestB trên loop KHÁC (two-loop case: hai mép hở riêng biệt)
+        int   bestB    = -1;
+        float bestDist = float.MaxValue;
+        foreach (var kv in bWorldPos)
+        {
+            if (compA.Contains(kv.Key)) continue;
+            float d = Vector3.Distance(kv.Value, hitA);
+            if (d < bestDist) { bestDist = d; bestB = kv.Key; }
+        }
+
+        // [FIX-v9-3] Chỉ còn 1 loop (ống tay áo): dùng centroid projection thay vì
+        // lọc khoảng cách tuyệt đối. Tính centroid của toàn bộ boundary loop, sau đó
+        // hướng từ centroid → nearestToA. Đỉnh bestB là đỉnh có dot product nhỏ nhất
+        // với hướng đó (= phía đối diện của loop), tức là mép kia của ống tay áo.
+        if (bestB < 0)
+        {
+            // Tính centroid boundary loop
+            Vector3 centroid = Vector3.zero;
+            foreach (var kv in bWorldPos) centroid += kv.Value;
+            centroid /= bWorldPos.Count;
+
+            // Hướng centroid → nearestToA
+            Vector3 posNearestA = bWorldPos[nearestToA];
+            Vector3 dirA = (posNearestA - centroid);
+            float   dirALen = dirA.magnitude;
+
+            // Nếu mesh gần như phẳng (centroid == nearestToA), fallback khoảng cách
+            if (dirALen < 1e-4f)
+            {
+                float antiWeldRadius = sewRadius * 1.5f;
+                bestDist = float.MaxValue;
+                foreach (var kv in bWorldPos)
+                {
+                    float d = Vector3.Distance(kv.Value, hitA);
+                    if (d > antiWeldRadius && d <= searchRadius && d < bestDist)
+                    {
+                        bestDist = d; bestB = kv.Key;
+                    }
+                }
+            }
+            else
+            {
+                dirA /= dirALen; // normalize
+                float bestDot = float.MaxValue;
+                foreach (var kv in bWorldPos)
+                {
+                    if (kv.Key == nearestToA) continue;
+                    float d = Vector3.Distance(kv.Value, hitA);
+                    if (d > searchRadius) continue;          // quá xa
+                    if (d < sewRadius * 0.5f) continue;      // quá gần, tránh self-collapse
+
+                    Vector3 dirV = ((kv.Value - centroid).normalized);
+                    float dot = Vector3.Dot(dirA, dirV);
+                    if (dot < bestDot) // càng nhỏ = càng đối diện
+                    {
+                        bestDot = dot; bestDist = d; bestB = kv.Key;
+                    }
+                }
+            }
+
+            if (bestB >= 0)
+                Debug.Log($"[MeshSewer] Single-loop self-sew (ống tay áo): bestB dist={bestDist:F4}");
+            else
+                Debug.LogWarning("[MeshSewer] Không tìm được bestB trong loop duy nhất — mesh có thể đã kín.");
+        }
+
+        if (bestB < 0 || !bWorldPos.ContainsKey(bestB)) return hitA;
+        return bWorldPos[bestB];
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────
 
-    /// <summary>
-    /// Tìm index của loop có centroid gần seed nhất.
-    /// excludeIdx: bỏ qua index này (dùng khi tìm loopB ≠ loopA).
-    /// </summary>
     private static int FindNearestLoopIdx(
         List<(Vector3d center, List<int> verts)> centroids,
-        Vector3d seed,
-        int excludeIdx = -1)
+        Vector3d seed, int excludeIdx = -1)
     {
         int    best     = -1;
         double bestDist = double.MaxValue;
@@ -669,26 +991,122 @@ public class MeshSewer_UCloth
         if (!mesh.IsVertex(vA) || !mesh.IsVertex(vB)) return false;
 
         var trisOfB = mesh.VtxTrianglesItr(vB).ToList();
-        if (trisOfB.Count == 0) return false;
+        if (trisOfB.Count == 0)
+        {
+            // vB đang bị cô lập — xóa luôn để tránh zombie vertex
+            if (mesh.IsVertex(vB)) mesh.RemoveVertex(vB, true, false);
+            return false;
+        }
 
-        var toRebuild = new List<(int a, int b, int c, int gid)>();
+        // ── DRY-RUN: build danh sách rebuild VÀ kiểm tra non-manifold TRƯỚC khi xóa bất cứ gì ──
+        // Theo dõi số lần mỗi edge (chuẩn hóa a<b) sẽ xuất hiện trong toRebuild.
+        // Một edge trong mesh 2-manifold chỉ được dùng bởi tối đa 2 triangle.
+        // Nếu edge đã có 1 face ngoài trisOfB + 1 face trong toRebuild = 2 → ok (đóng seam).
+        // Nếu edge đã có 1 face ngoài + ≥2 trong toRebuild → sẽ thành T-junction → ABORT.
+        // Nếu edge chưa tồn tại + ≥2 trong toRebuild → cũng T-junction → ABORT.
+        var trisOfBSet = new HashSet<int>(trisOfB);
+        var toRebuild  = new List<(int a, int b, int c, int gid)>();
+
+        // [FIX-v9-1] Track số lần edge mới sẽ được toRebuild đăng ký
+        var newEdgesInRebuild = new Dictionary<(int, int), int>();
+
         foreach (int tid in trisOfB)
         {
+            if (!mesh.IsTriangle(tid)) continue;
             Index3i tri = mesh.GetTriangle(tid);
-            int a   = tri.a == vB ? vA : tri.a;
-            int b   = tri.b == vB ? vA : tri.b;
-            int c   = tri.c == vB ? vA : tri.c;
+            int ra  = tri.a == vB ? vA : tri.a;
+            int rb  = tri.b == vB ? vA : tri.b;
+            int rc  = tri.c == vB ? vA : tri.c;
             int gid = mesh.HasTriangleGroups ? mesh.GetTriangleGroup(tid) : -1;
-            toRebuild.Add((a, b, c, gid));
+
+            if (!mesh.IsVertex(ra) || !mesh.IsVertex(rb) || !mesh.IsVertex(rc)) continue;
+            if (ra == rb || rb == rc || ra == rc) continue; // degenerate
+
+            // Kiểm tra từng edge của triangle rebuild
+            bool edgesOk = true;
+            var edgePairs = new (int, int)[]
+            {
+                (System.Math.Min(ra,rb), System.Math.Max(ra,rb)),
+                (System.Math.Min(rb,rc), System.Math.Max(rb,rc)),
+                (System.Math.Min(ra,rc), System.Math.Max(ra,rc))
+            };
+
+            foreach (var ekey in edgePairs)
+            {
+                // Đếm face ngoài trisOfB đang dùng edge này
+                int externalCount = 0;
+                int eid = mesh.FindEdge(ekey.Item1, ekey.Item2);
+                if (eid != DMesh3.InvalidID)
+                {
+                    Index2i edgeTris = mesh.GetEdgeT(eid);
+                    if (edgeTris.a != DMesh3.InvalidID && !trisOfBSet.Contains(edgeTris.a)) externalCount++;
+                    if (edgeTris.b != DMesh3.InvalidID && !trisOfBSet.Contains(edgeTris.b)) externalCount++;
+                }
+
+                // Đếm face trong toRebuild (đã đăng ký trước) dùng edge này
+                newEdgesInRebuild.TryGetValue(ekey, out int rebuildCount);
+
+                // Tổng sau khi thêm triangle này = externalCount + rebuildCount + 1
+                // Nếu > 2 → T-junction → ABORT
+                if (externalCount + rebuildCount + 1 > 2)
+                {
+                    edgesOk = false;
+                    break;
+                }
+            }
+
+            if (!edgesOk)
+            {
+                // ABORT toàn bộ collapse này — không xóa gì, giữ nguyên topology
+                Debug.LogWarning($"[MeshSewer] TryCollapseToA: SKIP vA={vA} vB={vB} — non-manifold edge, topology được giữ nguyên.");
+                return false;
+            }
+
+            // Đăng ký edges của triangle này vào bảng theo dõi
+            foreach (var ekey in edgePairs)
+            {
+                newEdgesInRebuild.TryGetValue(ekey, out int c);
+                newEdgesInRebuild[ekey] = c + 1;
+            }
+
+            toRebuild.Add((ra, rb, rc, gid));
+        }
+
+        // ── COMMIT ──────────────────────────────────────────────────────────
+        // Trường hợp toRebuild rỗng: toàn bộ triangle của vB đều degenerate sau khi thay vB→vA.
+        // Xảy ra khi vA và vB kề nhau (share edge) → triangle chứa cả hai thành (vA,vA,X).
+        // Đây là collapse HỢP LỆ (seam hoàn chỉnh): xóa degenerate tris và vB, không rebuild.
+        if (toRebuild.Count == 0)
+        {
+            bool allDegenerate = true;
+            foreach (int tid in trisOfB)
+            {
+                if (!mesh.IsTriangle(tid)) continue;
+                Index3i tri = mesh.GetTriangle(tid);
+                int ra = tri.a == vB ? vA : tri.a;
+                int rb = tri.b == vB ? vA : tri.b;
+                int rc = tri.c == vB ? vA : tri.c;
+                if (ra != rb && rb != rc && ra != rc) { allDegenerate = false; break; }
+            }
+            if (!allDegenerate) return false; // có triangle hợp lệ bị lọc nhầm — không xóa gì
+
+            foreach (int tid in trisOfB)
+                if (mesh.IsTriangle(tid))
+                    mesh.RemoveTriangle(tid, false, false);
+            if (mesh.IsVertex(vB) && mesh.GetVtxTriangleCount(vB) == 0)
+                mesh.RemoveVertex(vB, true, false);
+            return true;
         }
 
         foreach (int tid in trisOfB)
-            mesh.RemoveTriangle(tid, false, false);
+            if (mesh.IsTriangle(tid))
+                mesh.RemoveTriangle(tid, false, false);
 
         foreach (var (a, b, c, gid) in toRebuild)
         {
-            if (a == b || b == c || a == c) continue;
-            mesh.AppendTriangle(a, b, c, gid);
+            int res = mesh.AppendTriangle(a, b, c, gid);
+            if (res < 0)
+                Debug.LogError($"[MeshSewer] TryCollapseToA: UNEXPECTED reject ({a},{b},{c}) res={res} — dry-run có lỗi!");
         }
 
         if (mesh.IsVertex(vB) && mesh.GetVtxTriangleCount(vB) == 0)
@@ -704,8 +1122,7 @@ public class MeshSewer_UCloth
         if (a == null || a.Length == 0) return b ?? new T[0];
         if (b == null || b.Length == 0) return a;
         var result = new T[a.Length + b.Length];
-        a.CopyTo(result, 0);
-        b.CopyTo(result, a.Length);
+        a.CopyTo(result, 0); b.CopyTo(result, a.Length);
         return result;
     }
 
@@ -717,7 +1134,6 @@ public class MeshSewer_UCloth
         go.SetActive(false);
     }
 
-    // ── ExtractBoundaryLoops ──────────────────────────────────────────────
     private static List<List<int>> ExtractBoundaryLoops(DMesh3 mesh, HashSet<int> boundaryVerts)
     {
         var adj = new Dictionary<int, List<int>>();
@@ -741,8 +1157,7 @@ public class MeshSewer_UCloth
 
             var loop  = new List<int>();
             var queue = new Queue<int>();
-            queue.Enqueue(start);
-            visited.Add(start);
+            queue.Enqueue(start); visited.Add(start);
 
             while (queue.Count > 0)
             {
@@ -752,41 +1167,124 @@ public class MeshSewer_UCloth
                 foreach (int nb in adj[cur])
                     if (!visited.Contains(nb)) { visited.Add(nb); queue.Enqueue(nb); }
             }
-
             loops.Add(loop);
         }
-
         return loops;
     }
-    // ── UpdateLiveVisuals (v8.3 - Real-time Preview) ─────────────────────
+private static bool IsWindingInconsistent(Index3i tA, Index3i tB)
+    {
+        // Tìm 2 đỉnh chung tạo nên cạnh biên kề nhau giữa 2 tam giác
+        int sharedCount = 0;
+        int[] shared = new int[2];
+        
+        int[] arrA = new int[] { tA.a, tA.b, tA.c };
+        int[] arrB = new int[] { tB.a, tB.b, tB.c };
+
+        foreach (int vA in arrA)
+        {
+            foreach (int vB in arrB)
+            {
+                if (vA == vB)
+                {
+                    if (sharedCount < 2) shared[sharedCount] = vA;
+                    sharedCount++;
+                }
+            }
+        }
+
+        if (sharedCount != 2) return false; // Không chung cạnh hoặc trùng lặp dị thường
+
+        // Trong mesh định hướng chuẩn (Manifold Oriented), một cạnh đi từ X -> Y ở tam giác này 
+        // thì bắt buộc phải đi từ Y -> X ở tam giác kề.
+        int idxA_0 = System.Array.IndexOf(arrA, shared[0]);
+        int idxA_1 = System.Array.IndexOf(arrA, shared[1]);
+        bool isForwardA = ((idxA_0 + 1) % 3 == idxA_1);
+
+        int idxB_0 = System.Array.IndexOf(arrB, shared[0]);
+        int idxB_1 = System.Array.IndexOf(arrB, shared[1]);
+        bool isForwardB = ((idxB_0 + 1) % 3 == idxB_1);
+
+        // Nếu cả 2 đều chạy xuôi hoặc cả 2 đều chạy ngược hướng trên cùng một đoạn thẳng 
+        // nghĩa là định hướng đang bị xung đột (Inconsistent Winding)
+        return isForwardA == isForwardB;
+    }
+    private static void AddEdge(Dictionary<(int, int), int> dict, int a, int b)
+    {
+        var key = a < b ? (a, b) : (b, a);
+        dict.TryGetValue(key, out int c); dict[key] = c + 1;
+    }
+
+    private static Dictionary<int, List<int>> BuildBoundaryAdjacency(
+        Dictionary<(int, int), int> edgeCount, HashSet<int> boundarySet)
+    {
+        var adj = new Dictionary<int, List<int>>();
+        foreach (int v in boundarySet) adj[v] = new List<int>();
+        foreach (var kv in edgeCount)
+        {
+            if (kv.Value != 1) continue;
+            int a = kv.Key.Item1, b = kv.Key.Item2;
+            if (adj.ContainsKey(a)) adj[a].Add(b);
+            if (adj.ContainsKey(b)) adj[b].Add(a);
+        }
+        return adj;
+    }
+
+    private static HashSet<int> FloodFill(int start, Dictionary<int, List<int>> adj)
+    {
+        var visited = new HashSet<int>();
+        var queue   = new Queue<int>();
+        queue.Enqueue(start); visited.Add(start);
+        while (queue.Count > 0)
+        {
+            int cur = queue.Dequeue();
+            if (!adj.ContainsKey(cur)) continue;
+            foreach (int nb in adj[cur]) if (visited.Add(nb)) queue.Enqueue(nb);
+        }
+        return visited;
+    }
+
+    private static T[] MergeColliderArrays<T>(T[] arrayA, T[] arrayB,
+        GameObject excludeGoA = null, GameObject excludeGoB = null) where T : Collider
+    {
+        var list = new List<T>();
+        foreach (var arr in new[] { arrayA, arrayB })
+        {
+            if (arr == null) continue;
+            foreach (var c in arr)
+            {
+                if ((UnityEngine.Object)c == null) continue;
+                if (excludeGoA != null && c.gameObject == excludeGoA) continue;
+                if (excludeGoB != null && c.gameObject == excludeGoB) continue;
+                if (excludeGoA != null && c.transform.IsChildOf(excludeGoA.transform)) continue;
+                if (excludeGoB != null && c.transform.IsChildOf(excludeGoB.transform)) continue;
+                if (!list.Contains(c)) list.Add(c);
+            }
+        }
+        return list.ToArray();
+    }
+
+    // ── UpdateLiveVisuals ─────────────────────────────────────────────────
     public void UpdateLiveVisuals()
     {
         if (_combined == null || _goA == null) return;
 
-        // Tắt hiển thị Mesh Renderer gốc của các vật thể đang khâu để tránh chồng chéo đồ họa
         var mrA = _goA.GetComponent<MeshRenderer>(); if (mrA != null) mrA.enabled = false;
         if (!_isSelfSew && _goB != null) { var mrB = _goB.GetComponent<MeshRenderer>(); if (mrB != null) mrB.enabled = false; }
 
-        // Khởi tạo GameObject xem trước nếu chưa có
         if (_previewObjEdge == null)
         {
             _previewObjEdge = new GameObject("[Sewing_Preview_Mesh]");
             _previewObjEdge.transform.SetPositionAndRotation(Vector3.zero, Quaternion.identity);
             _previewObjEdge.transform.localScale = Vector3.one;
-
-            _previewFilter = _previewObjEdge.AddComponent<MeshFilter>();
+            _previewFilter   = _previewObjEdge.AddComponent<MeshFilter>();
             _previewRenderer = _previewObjEdge.AddComponent<MeshRenderer>();
-            
-            // Lấy tạm vật liệu từ mesh A để hiển thị cho đồng bộ
             if (mrA != null) _previewRenderer.sharedMaterials = mrA.sharedMaterials;
         }
 
-        // Xuất mesh từ cấu trúc hình học DMesh3 hiện tại (giữ không gian World để vẽ chính xác)
         Mesh previewMesh = G3MeshBridge.ToUnityMesh(_combined, null, out _, toLocalSpace: false);
         _previewFilter.mesh = previewMesh;
     }
 
-    // Thêm hàm dọn dẹp cấu trúc xem trước khi hủy hoặc kết thúc Session
     public void ClearPreviewVisuals()
     {
         if (_previewObjEdge != null)
@@ -794,8 +1292,6 @@ public class MeshSewer_UCloth
             Object.Destroy(_previewObjEdge);
             _previewObjEdge = null;
         }
-
-        // Khôi phục lại hiển thị cho các Mesh gốc nếu session bị hủy giữa chừng
         if (_goA != null) { var mrA = _goA.GetComponent<MeshRenderer>(); if (mrA != null) mrA.enabled = true; }
         if (!_isSelfSew && _goB != null) { var mrB = _goB.GetComponent<MeshRenderer>(); if (mrB != null) mrB.enabled = true; }
     }

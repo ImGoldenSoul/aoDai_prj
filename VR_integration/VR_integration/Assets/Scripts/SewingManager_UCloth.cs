@@ -1,5 +1,17 @@
 // ============================================================
-//  SewingManager_UCloth.cs  — v6.5 (Bổ sung Tự động Finalize không cần nút)
+//  SewingManager_UCloth.cs  — v6.7
+//
+//  [FIX-v9-4] Guard hitA≈hitB cho self-sew (ống tay áo).
+//          Vấn đề cũ: khi FindSelfSewSecondaryHit không tìm được đỉnh đối diện
+//          (loop quá nhỏ hoặc searchRadius quá hẹp), nó trả về hitA. SewingManager
+//          vẫn gọi Initialize/AddSeam với seedA==seedB → candA và candB query cùng
+//          một vùng → overlap hoàn toàn → tự collapse đỉnh kề nhau → topology vỡ.
+//          Fix: nếu Distance(hitA, hitB) < sewRadius * 0.3f sau khi gọi
+//          FindSelfSewSecondaryHit → bỏ qua frame đó, không khởi tạo session.
+//
+//  Giữ nguyên từ v6.6:
+//  [FIX BUG-4] WaitingForNextSeam kiểm tra HasOpenBoundary trước AddSeam.
+//  [FIX BUG-3] FindSelfSewSecondaryHit delegate sang MeshSewer_UCloth (static).
 // ============================================================
 using System.Collections.Generic;
 using UnityEngine;
@@ -10,9 +22,6 @@ public class SewingManager_UCloth : MonoBehaviour
     [Header("References")]
     public GameObject sewer;
 
-    // FIX Bug khâu-xong-không-cắt-được:
-    // SewingManager phải biết CuttingManager để đăng ký mesh mới khâu vào
-    // hệ thống cắt. Kéo CuttingManager_UCloth từ Scene vào đây trong Inspector.
     [Tooltip("Kéo CuttingManager_UCloth từ Scene vào đây để mesh sau khi khâu có thể cắt tiếp được.")]
     public CuttingManager_UCloth cuttingManager;
 
@@ -33,7 +42,7 @@ public class SewingManager_UCloth : MonoBehaviour
     public float selfSewSearchRadius       = 0.3f;
 
     [Header("Auto-Finalize Settings")]
-    [Tooltip("Tự động hoàn tất và tạo mesh vải sau N giây nếu người dùng không khâu thêm gì.")]
+    [Tooltip("Tự động hoàn tất sau N giây nếu người dùng không khâu thêm gì.")]
     public bool  useAutoFinalize   = true;
     public float autoFinalizeDelay = 1.5f;
 
@@ -48,13 +57,11 @@ public class SewingManager_UCloth : MonoBehaviour
     private Vector3 _lastAddedHitA = Vector3.positiveInfinity;
     private Vector3 _lastAddedHitB = Vector3.positiveInfinity;
 
-    // Bộ đếm thời gian không tương tác để tự động Finalize
     private float _noInteractionTimer = 0f;
 
     // Gizmo
     private Vector3 _gizmoHitA, _gizmoHitB;
     private bool    _gizmoHasHit;
-    
 
     // ── Public API ────────────────────────────────────────────────────────
     public void FinalizeSession()
@@ -64,7 +71,6 @@ public class SewingManager_UCloth : MonoBehaviour
             Debug.LogWarning("[SewingManager] Không có session nào để Finalize.");
             return;
         }
-
         _state = SessionState.Finalizing;
         Debug.Log("[SewingManager] FinalizeSession() được kích hoạt.");
     }
@@ -72,7 +78,7 @@ public class SewingManager_UCloth : MonoBehaviour
     public void CancelSession()
     {
         if (_state == SessionState.Idle) return;
-        _sewer?.ClearPreviewVisuals(); // Dọn dẹp đồ họa preview sạch sẽ
+        _sewer?.ClearPreviewVisuals();
         _sewer = null;
         _objA = _objB = null;
         _state = SessionState.Idle;
@@ -80,27 +86,27 @@ public class SewingManager_UCloth : MonoBehaviour
         _noInteractionTimer = 0f;
         Debug.Log("[SewingManager] Session bị hủy.");
     }
-void Start()
-{
-    var clothObjects = GameObject.FindGameObjectsWithTag(clothTag);
-    foreach (var obj in clothObjects)
+
+    void Start()
     {
-        RegisterClothObject(obj);
+        var clothObjects = GameObject.FindGameObjectsWithTag(clothTag);
+        foreach (var obj in clothObjects)
+            RegisterClothObject(obj);
     }
-}
+
     // ── LateUpdate ────────────────────────────────────────────────────────
     void LateUpdate()
     {
         if (sewer == null) return;
 
-        // ── 1. Khối xử lý Finalize ────────────────────────────────────────
+        // ── 1. Finalize ───────────────────────────────────────────────────
         if (_state == SessionState.Finalizing)
         {
             CommitSewn();
             return;
         }
 
-        // ── 2. Khối tiến trình khâu (Progressive Sewing & Animation) ────────
+        // ── 2. Tiến trình khâu progressive ───────────────────────────────
         if (_state == SessionState.Sewing && _sewer != null)
         {
             bool done = _sewer.Sew();
@@ -108,14 +114,22 @@ void Start()
 
             if (done)
             {
+                // [FIX BUG-4] Nếu mesh đã kín sau batch này → Finalize ngay
+                if (!_sewer.HasOpenBoundary)
+                {
+                    Debug.Log("<color=green>[SewingManager]</color> Mesh đã kín hoàn toàn sau khâu. Tự động Finalize.");
+                    _state = SessionState.Finalizing;
+                    return;
+                }
+
                 _state = SessionState.WaitingForNextSeam;
-                _noInteractionTimer = 0f; // Reset bộ đếm khi vừa kết thúc 1 cụm đỉnh
+                _noInteractionTimer = 0f;
                 Debug.Log("[SewingManager] Đường khâu tạm thời hoàn tất. Chờ hành động tiếp theo...");
             }
-            return; 
+            return;
         }
 
-        // ── 3. Cơ chế tự động Finalize khi người dùng đứng yên / ngừng khâu ──
+        // ── 3. Auto-Finalize khi đứng yên ────────────────────────────────
         if (useAutoFinalize && _state == SessionState.WaitingForNextSeam && _sewer != null)
         {
             _noInteractionTimer += Time.deltaTime;
@@ -127,7 +141,7 @@ void Start()
             }
         }
 
-        // ── 4. Bắn Raycast tìm dữ liệu hình học bề mặt vải ─────────────────
+        // ── 4. Raycast ────────────────────────────────────────────────────
         Ray sewRay = new Ray(sewer.transform.position, sewer.transform.forward);
         var hits = Physics.RaycastAll(sewRay, rayLength).OrderBy(h => h.distance).ToList();
 
@@ -145,13 +159,9 @@ void Start()
             if (clothHits.Count == 2) break;
         }
 
-        if (clothHits.Count == 0) 
-        { 
-            _gizmoHasHit = false; 
-            return; 
-        }
+        if (clothHits.Count == 0) { _gizmoHasHit = false; return; }
 
-        // ── 5. Phân tách tọa độ điểm chạm A và B ───────────────────────────
+        // ── 5. Phân tách hitA / hitB ──────────────────────────────────────
         GameObject goA, goB;
         Vector3    hitA, hitB;
         bool       isSelf;
@@ -168,64 +178,93 @@ void Start()
             goB  = goA;
             isSelf = true;
             hitB = FindSelfSewSecondaryHit(goA, hitA);
+
+            // [FIX-v9-4] Guard: hitB vẫn quá gần hitA → FindSelfSewSecondaryHit
+            // không tìm được đỉnh đối diện (thường xảy ra khi searchRadius nhỏ hơn
+            // kích thước loop hoặc mesh đã gần kín). Bỏ qua frame này để tránh
+            // Initialize(seedA==seedB) → candA∩candB overlap → tự collapse topology.
+            if (Vector3.Distance(hitA, hitB) < sewRadius * 0.3f)
+            {
+                _gizmoHasHit = false;
+                return;
+            }
         }
 
         _gizmoHitA   = hitA;
         _gizmoHitB   = hitB;
         _gizmoHasHit = true;
 
-        // ── 6. Xử lý trạng thái WAITING: Nối tiếp đường khâu trên cùng Mesh ──
+        // ── 6. WaitingForNextSeam: Tiếp tục khâu ─────────────────────────
         if (_state == SessionState.WaitingForNextSeam)
         {
             bool targetMatchesSession = (goA == _objA || goA == _objB) || (goB == _objA || goB == _objB);
             if (!targetMatchesSession) return;
 
+            // [FIX BUG-4] Kiểm tra mesh còn boundary trước khi AddSeam
+            if (!_sewer.HasOpenBoundary)
+            {
+                Debug.Log("<color=green>[SewingManager]</color> Mesh đã kín — chuyển sang Finalize.");
+                _state = SessionState.Finalizing;
+                return;
+            }
+
             if (goA == goB || clothHits.Count < 2)
             {
                 hitB = FindSelfSewSecondaryHit(goA, hitA);
                 _isSelfSew = true;
+
+                // [FIX-v9-4] Guard cho WaitingForNextSeam: hitB vẫn quá gần hitA
+                if (Vector3.Distance(hitA, hitB) < sewRadius * 0.3f)
+                {
+                    _noInteractionTimer += Time.deltaTime; // đếm thời gian chờ bình thường
+                    return;
+                }
             }
 
-            // Kiểm tra Debounce chống spam trùng vị trí
             float moveA = Vector3.Distance(hitA, _lastAddedHitA);
             float moveB = Vector3.Distance(hitB, _lastAddedHitB);
-            
-            // Nếu di chuyển tâm khâu vượt quá khoảng cách tối thiểu, ta coi như có tương tác mới
-            if (moveA < sewRadius * 0.3f && moveB < sewRadius * 0.3f) 
-            {
-                return; 
-            }
+            if (moveA < sewRadius * 0.3f && moveB < sewRadius * 0.3f) return;
 
-            // Có di chuyển tâm khâu -> Reset bộ đếm thời gian tự động
             _noInteractionTimer = 0f;
-
             Debug.Log($"[SewingManager] Tiếp tục thêm đường khâu: hitA={hitA:F3} <-> hitB={hitB:F3}");
 
             bool added = _sewer.AddSeam(hitA, hitB, sewRadius);
-            if (!added) return;
+            if (!added)
+            {
+                // AddSeam trả false có thể vì mesh vừa kín → Finalize
+                if (!_sewer.HasOpenBoundary)
+                {
+                    Debug.Log("<color=green>[SewingManager]</color> AddSeam thất bại vì mesh đã kín. Finalize.");
+                    _state = SessionState.Finalizing;
+                }
+                return;
+            }
 
             _lastAddedHitA = hitA;
             _lastAddedHitB = hitB;
             _state = SessionState.Sewing;
 
-            if (immediateWeld) 
-            { 
-                while (!_sewer.Sew()) { } 
+            if (immediateWeld)
+            {
+                while (!_sewer.Sew()) { }
                 _sewer.UpdateLiveVisuals();
-                _state = SessionState.WaitingForNextSeam;
+                _state = _sewer.HasOpenBoundary
+                    ? SessionState.WaitingForNextSeam
+                    : SessionState.Finalizing;
                 _noInteractionTimer = 0f;
             }
-            return; 
+            return;
         }
 
-        // ── 7. Trạng thái IDLE: Khởi tạo Session khâu hoàn toàn mới ──────────
+        // ── 7. Idle: Khởi tạo session mới ────────────────────────────────
         if (_state == SessionState.Idle)
         {
             _objA      = goA;
             _objB      = goB;
             _isSelfSew = isSelf;
 
-            _sewer = new MeshSewer_UCloth(goA, goB, weldThreshold, immediateWeld ? int.MaxValue : edgesPerFrame);
+            _sewer = new MeshSewer_UCloth(goA, goB, weldThreshold,
+                                          immediateWeld ? int.MaxValue : edgesPerFrame);
             _sewer.OnSeamCompleted = RegisterSewnMesh;
 
             if (isSelf)
@@ -244,11 +283,13 @@ void Start()
             _state = SessionState.Sewing;
             _noInteractionTimer = 0f;
 
-            if (immediateWeld) 
-            { 
-                while (!_sewer.Sew()) { } 
+            if (immediateWeld)
+            {
+                while (!_sewer.Sew()) { }
                 _sewer.UpdateLiveVisuals();
-                _state = SessionState.WaitingForNextSeam;
+                _state = _sewer.HasOpenBoundary
+                    ? SessionState.WaitingForNextSeam
+                    : SessionState.Finalizing;
                 _noInteractionTimer = 0f;
             }
         }
@@ -278,122 +319,44 @@ void Start()
         Debug.Log("[SewingManager] Session hoàn tất.");
     }
 
+    // [FIX BUG-3] Delegate sang MeshSewer_UCloth.FindSelfSewSecondaryHit
+    // để dùng chung logic sleeve (1-loop) đã được fix
     private Vector3 FindSelfSewSecondaryHit(GameObject go, Vector3 hitA)
     {
-        if (!useSecondaryRayForSelfSew) return hitA;
-
-        var mf = go.GetComponent<MeshFilter>();
-        if (mf == null) return hitA;
-
-        Mesh      mesh  = mf.mesh;
-        Vector3[] verts = mesh.vertices;
-        int[]     tris  = mesh.triangles;
-        Transform tf    = go.transform;
-
-        var edgeCount = new Dictionary<(int, int), int>();
-        for (int t = 0; t < tris.Length; t += 3)
-        {
-            int a = tris[t], b = tris[t+1], c = tris[t+2];
-            AddEdge(edgeCount, a, b); AddEdge(edgeCount, b, c); AddEdge(edgeCount, a, c);
-        }
-
-        var boundarySet = new HashSet<int>();
-        foreach (var kv in edgeCount)
-            if (kv.Value == 1) { boundarySet.Add(kv.Key.Item1); boundarySet.Add(kv.Key.Item2); }
-
-        if (boundarySet.Count == 0) return hitA;
-
-        // BẢO ĐẢM ĐỒNG BỘ TOẠ ĐỘ: Ép chuyển chính xác từ Local sang World Space dựa trên transform thực thể vải
-        var bWorldPos = new Dictionary<int, Vector3>();
-        foreach (int v in boundarySet)
-        {
-            if (v >= 0 && v < verts.Length)
-            {
-                bWorldPos[v] = tf.TransformPoint(verts[v]);
-            }
-        }
-
-        if (bWorldPos.Count == 0) return hitA;
-
-        int   nearestToA  = -1;
-        float nearestDist = float.MaxValue;
-        foreach (var kv in bWorldPos)
-        {
-            float d = Vector3.Distance(kv.Value, hitA);
-            if (d < nearestDist) { nearestDist = d; nearestToA = kv.Key; }
-        }
-        if (nearestToA < 0) return hitA;
-
-        var adjBoundary = BuildBoundaryAdjacency(edgeCount, boundarySet);
-        var compA       = FloodFill(nearestToA, adjBoundary);
-
-        int   bestB    = -1;
-        float bestDist = float.MaxValue;
-
-        foreach (var kv in bWorldPos)
-        {
-            if (compA.Contains(kv.Key)) continue;
-            float d = Vector3.Distance(kv.Value, hitA);
-            if (d < bestDist) { bestDist = d; bestB = kv.Key; }
-        }
-
-        if (bestB < 0)
-        {
-            float antiWeldRadius = sewRadius * 1.5f;
-            bestDist = float.MaxValue;
-
-            foreach (var kv in bWorldPos)
-            {
-                float d = Vector3.Distance(kv.Value, hitA);
-                if (d > antiWeldRadius && d < bestDist) { bestDist = d; bestB = kv.Key; }
-            }
-        }
-
-        if (bestB < 0 || !bWorldPos.ContainsKey(bestB)) return hitA;
-
-        return bWorldPos[bestB];
+        return MeshSewer_UCloth.FindSelfSewSecondaryHit(
+            go, hitA, sewRadius,
+            useSecondaryRayForSelfSew, selfSewSearchRadius);
     }
-// Thêm vào trong class SewingManager_UCloth
-public void RegisterClothObject(GameObject obj)
-{
-    if (obj == null) return;
-    
-    // Đảm bảo object có tag chuẩn để Raycast tìm kiếm bề mặt vải nhận diện đúng
-    if (!obj.CompareTag(clothTag))
+
+    public void RegisterClothObject(GameObject obj)
     {
-        obj.tag = clothTag;
+        if (obj == null) return;
+        if (!obj.CompareTag(clothTag)) obj.tag = clothTag;
+        Debug.Log($"[SewingManager] Đã đăng ký '{obj.name}' làm mục tiêu khâu.");
     }
 
-    Debug.Log($"[SewingManager] Đã tái đăng ký thành công mảnh vải mới '{obj.name}' làm mục tiêu khâu tiếp theo.");
-}
     private void RegisterSewnMesh(GameObject sewn)
     {
         if (sewn == null) return;
-
-        // Đăng ký để SewingManager có thể khâu tiếp
         RegisterClothObject(sewn);
 
-        // Tự tìm CuttingManager trong scene nếu chưa gán trong Inspector
         if (cuttingManager == null)
         {
             cuttingManager = FindObjectOfType<CuttingManager_UCloth>();
             if (cuttingManager != null)
-                Debug.LogWarning("[SewingManager] cuttingManager chưa được gán trong Inspector — tự tìm trong scene. " +
-                                 "Hãy gán thủ công để tránh chi phí FindObjectOfType mỗi lần khâu.");
+                Debug.LogWarning("[SewingManager] cuttingManager chưa được gán trong Inspector — tự tìm trong scene.");
         }
 
         if (cuttingManager != null)
         {
             cuttingManager.RegisterClothObject(sewn);
-            Debug.Log($"[SewingManager] '{sewn.name}' đã được đăng ký vào CuttingManager — có thể cắt tiếp.");
+            Debug.Log($"[SewingManager] '{sewn.name}' đã được đăng ký vào CuttingManager.");
         }
         else
         {
-            Debug.LogError("[SewingManager] Không tìm thấy CuttingManager_UCloth trong scene! " +
-                           "Mesh vừa khâu sẽ KHÔNG thể cắt được.");
+            Debug.LogError("[SewingManager] Không tìm thấy CuttingManager_UCloth trong scene! Mesh vừa khâu KHÔNG thể cắt được.");
         }
 
-        // Cấu hình tương tác VR
         if (VRContext.Instance != null)
         {
             var grabber = sewn.GetComponent<UClothLaserGrabber>();
@@ -402,47 +365,11 @@ public void RegisterClothObject(GameObject obj)
                 grabber.vrController = VRContext.Instance.leftHandController;
                 grabber.grabSphere   = VRContext.Instance.grabSphereTarget;
             }
-            // KHÔNG ghi đè cubeColliders sau Awake() — UCCloth đã init với array từ Finalize().
-            // environmentColliders đã được MeshSewer.Finalize() merge vào khi copy từ _ucA.
         }
         else
         {
             Debug.LogWarning("[SewingManager] VRContext.Instance == null!");
         }
-    }
-
-    private static void AddEdge(Dictionary<(int,int), int> dict, int a, int b)
-    {
-        var key = a < b ? (a, b) : (b, a);
-        dict.TryGetValue(key, out int c); dict[key] = c + 1;
-    }
-
-    private static Dictionary<int, List<int>> BuildBoundaryAdjacency(Dictionary<(int,int), int> edgeCount, HashSet<int> boundarySet)
-    {
-        var adj = new Dictionary<int, List<int>>();
-        foreach (int v in boundarySet) adj[v] = new List<int>();
-        foreach (var kv in edgeCount)
-        {
-            if (kv.Value != 1) continue;
-            int a = kv.Key.Item1, b = kv.Key.Item2;
-            if (adj.ContainsKey(a)) adj[a].Add(b);
-            if (adj.ContainsKey(b)) adj[b].Add(a);
-        }
-        return adj;
-    }
-
-    private static HashSet<int> FloodFill(int start, Dictionary<int, List<int>> adj)
-    {
-        var visited = new HashSet<int>();
-        var queue   = new Queue<int>();
-        queue.Enqueue(start); visited.Add(start);
-        while (queue.Count > 0)
-        {
-            int cur = queue.Dequeue();
-            if (!adj.ContainsKey(cur)) continue;
-            foreach (int nb in adj[cur]) if (visited.Add(nb)) queue.Enqueue(nb);
-        }
-        return visited;
     }
 
     private static T[] MergeArrays<T>(T[] a, T[] b)
