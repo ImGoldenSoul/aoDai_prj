@@ -131,9 +131,12 @@ namespace UCloth
             if (optimizationData.IsCreated)
                 optimizationData.Dispose();
 
-            pointQueries.Dispose();
-            pointQueryResults.Dispose();
-            pointQueryIndexCounts.Dispose();
+            if (pointQueries.IsCreated)
+                pointQueries.Dispose();
+            if (pointQueryResults.IsCreated)
+                pointQueryResults.Dispose();
+            if (pointQueryIndexCounts.IsCreated)
+                pointQueryIndexCounts.Dispose();
 
             for (int i = 0; i < postprocessors?.Count; i++)
             {
@@ -164,6 +167,10 @@ namespace UCloth
 
         private void LateUpdate()
         {
+            // Guard: nếu SetUpData thất bại thì _ucRenderer chưa được tạo
+            if (simData == null)
+                return;
+
             if (qualityProperties.minimizeLatency)
                 _ucRenderer.ScheduleTransformations();
 
@@ -179,6 +186,10 @@ namespace UCloth
         /// <returns> List of point IDs, used as indices for simData. </returns>
         public async Task<List<ushort>> QueryClosestPoints(UCPointQueryData query)
         {
+            // Guard: SetUpData có thể đã thất bại → pointQueries chưa được allocate
+            if (simData == null || !pointQueries.IsCreated)
+                return new List<ushort>();
+
             // We can add the query straight away
             int queryIndex = pointQueries.Length;
 
@@ -522,7 +533,19 @@ namespace UCloth
             {
                 case UCPreprocessorType.Mesh:
                     preprocessor = new UCMeshPreprocessor();
-                    input = GetComponent<MeshFilter>().mesh;
+                    // [FIX] Luôn bake ra một Mesh thuần túy (plain UnityEngine.Mesh) trước khi
+                    // truyền vào preprocessor. Mesh từ MeshSewer có thể là subtype (UCTriangle, v.v.)
+                    // không có trong dictionary của UCMeshPreprocessor → KeyNotFoundException.
+                    // Baking tạo ra một instance Mesh mới, sạch, không có metadata thừa.
+                    var rawMesh = GetComponent<MeshFilter>().mesh;
+                    var bakedMesh = new Mesh();
+                    bakedMesh.indexFormat = rawMesh.indexFormat;
+                    bakedMesh.SetVertices(rawMesh.vertices);
+                    bakedMesh.SetTriangles(rawMesh.triangles, 0);
+                    bakedMesh.SetNormals(rawMesh.normals);
+                    bakedMesh.SetUVs(0, rawMesh.uv);
+                    bakedMesh.RecalculateBounds();
+                    input = bakedMesh;
                     break;
 
                 default:
