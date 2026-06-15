@@ -978,7 +978,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.2
+    gravityMultiplier: 0.02
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60
@@ -4795,6 +4795,7 @@ GameObject:
   - component: {fileID: 357928183}
   - component: {fileID: 357928182}
   - component: {fileID: 357928188}
+  - component: {fileID: 357928189}
   m_Layer: 0
   m_Name: Cloth_02
   m_TagString: Cloth
@@ -4809,7 +4810,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 357928181}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: e033741325d2bbc44bee52aa7b8c41e4, type: 3}
   m_Name: 
@@ -4978,6 +4979,26 @@ MonoBehaviour:
   grabber: {fileID: 357928182}
   pinAction: {fileID: -4289430672226363583, guid: c348712bda248c246b8c49b3db54643f, type: 3}
   pinForce: 100
+--- !u!114 &357928189
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 357928181}
+  m_Enabled: 1
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: aa8a9d48df69c3f42881f23ce1173c3b, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  vrController: {fileID: 2104264989}
+  triggerAction: {fileID: 6558622148059887818, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  rightController: {fileID: 151961090}
+  rightTriggerAction: {fileID: -1758520528963094988, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  pullForce: 15
+  sphereSize: 0
+  hoverColor: {r: 1, g: 1, b: 0, a: 0.6}
+  grabColor: {r: 0, g: 1, b: 0, a: 1}
 --- !u!1 &375522399
 GameObject:
   m_ObjectHideFlags: 0
@@ -5335,7 +5356,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.01
+    gravityMultiplier: 0.001
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60
@@ -7502,8 +7523,8 @@ Transform:
   m_GameObject: {fileID: 635129853}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: -1.3259995, y: 1.3119644, z: -4.9254937}
-  m_LocalScale: {x: 0.14223823, y: 0.14223823, z: 0.14223823}
+  m_LocalPosition: {x: -1.3259995, y: 1.329, z: -4.9254937}
+  m_LocalScale: {x: 0.037707582, y: 0.037707582, z: 0.037707582}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1292737796}
@@ -8460,11 +8481,11 @@ MonoBehaviour:
   sewer: {fileID: 6271176876846366318}
   cuttingManager: {fileID: 0}
   rayLength: 3
-  rayRadius: 0.05
+  rayRadius: 0.5
   showDebugRay: 1
   clothTag: Cloth
-  weldThreshold: 0.01
-  sewRadius: 0.1
+  weldThreshold: 0.02
+  sewRadius: 0.2
   edgesPerFrame: 3
   immediateWeld: 1
   useSecondaryRayForSelfSew: 0
@@ -10329,8 +10350,8 @@ Transform:
   m_GameObject: {fileID: 916951504}
   serializedVersion: 2
   m_LocalRotation: {x: -0, y: -0, z: -0, w: 1}
-  m_LocalPosition: {x: -2.18, y: 1.313964, z: -4.9254937}
-  m_LocalScale: {x: 0.14223823, y: 0.14223823, z: 0.14223823}
+  m_LocalPosition: {x: -2.215, y: 1.328, z: -4.9254937}
+  m_LocalScale: {x: 0.030345105, y: 0.030345105, z: 0.030345105}
   m_ConstrainProportionsScale: 0
   m_Children: []
   m_Father: {fileID: 1292737796}
@@ -18472,11 +18493,15 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: ec7c10bd5180b06459a4ae8fb9d27cba, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  cutter: {fileID: 1677894142041171170}
-  checkInterval: 3
-  splitOnlyWhenDisconnected: 1
-  splitForce: 1.5
+  cutter: {fileID: 2018390509783023192}
+  rayLength: 3
+  showDebugRay: 1
   clothTag: Cloth
+  splitForce: 1.5
+  splitOnlyWhenDisconnected: 1
+  minPathPoints: 5
+  minPathSpacing: 0.005
+  missFramesToCommit: 3
 --- !u!1 &1602418709
 GameObject:
   m_ObjectHideFlags: 0
@@ -24630,7 +24655,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.01
+    gravityMultiplier: 0.0005
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60
@@ -24745,7 +24770,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.01
+    gravityMultiplier: 0.005
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60
@@ -24867,7 +24892,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.01
+    gravityMultiplier: 0.0005
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60
@@ -25470,7 +25495,7 @@ MonoBehaviour:
     bendingCoefficient: 0
     vertexMass: 1
   simulationProperties:
-    gravityMultiplier: 0.2
+    gravityMultiplier: 0.01
     airResistanceMultiplier: 0.5
   qualityProperties:
     simFrequency: 60

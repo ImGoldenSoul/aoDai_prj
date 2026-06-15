@@ -747,60 +747,82 @@ public class MeshSewer_UCloth
             if (tidsToFlip.Count > 0)
                 compacted = new DMesh3(compacted, bCompact: true); // re-compact sau flip
 
-            // Bước D: Ép thể tích dương (Global Orientation) — tương tự Pass 2
-            // Phải re-query componentLists vì ID đã thay đổi sau compact → dùng flood-fill mới
+            // Bước D: Ép định hướng theo mesh gốc goA (reference-normal)
+            // [FIX-FLIP] Signed volume chỉ đúng với closed mesh. Vải sau khi khâu thường
+            // vẫn còn boundary edge (open mesh) → signed volume phụ thuộc origin, có thể
+            // âm dù winding đúng → flip nhầm toàn mesh → horizon bị lật.
+            // Fix: so sánh average normal của compacted với average normal của mesh gốc goA.
+            // Nếu dot < 0 → flip toàn bộ.
             {
-                var visitedD = new HashSet<int>();
-                foreach (int startTid in compacted.TriangleIndices().ToList())
+                // Thu thập reference normal từ mesh gốc goA (world space)
+                Vector3d referenceNormal = Vector3d.Zero;
                 {
-                    if (!compacted.IsTriangle(startTid) || visitedD.Contains(startTid)) continue;
-
-                    var comp = new List<int>();
-                    var queue = new Queue<int>();
-                    queue.Enqueue(startTid); visitedD.Add(startTid); comp.Add(startTid);
-                    while (queue.Count > 0)
+                    var srcMf = _goA.GetComponent<MeshFilter>();
+                    Mesh srcMesh = srcMf != null ? (srcMf.sharedMesh ?? srcMf.mesh) : null;
+                    if (srcMesh != null)
                     {
-                        int cur = queue.Dequeue();
-                        if (!compacted.IsTriangle(cur)) continue;
-                        Index3i triEdges = compacted.GetTriEdges(cur);
-                        foreach (int eid in new[] { triEdges.a, triEdges.b, triEdges.c })
+                        Vector3[] srcVerts = srcMesh.vertices;
+                        int[]     srcTris  = srcMesh.triangles;
+                        Transform srcTf    = _goA.transform;
+                        int sampleCount    = 0;
+                        for (int t = 0; t < srcTris.Length && sampleCount < 16; t += 3)
                         {
-                            if (eid == DMesh3.InvalidID) continue;
-                            Index2i et = compacted.GetEdgeT(eid);
-                            int nb = et.a == cur ? et.b : et.a;
-                            if (nb == DMesh3.InvalidID || visitedD.Contains(nb)) continue;
-                            if (!compacted.IsTriangle(nb)) continue;
-                            visitedD.Add(nb); comp.Add(nb); queue.Enqueue(nb);
+                            Vector3 wA = srcTf.TransformPoint(srcVerts[srcTris[t]]);
+                            Vector3 wB = srcTf.TransformPoint(srcVerts[srcTris[t + 1]]);
+                            Vector3 wC = srcTf.TransformPoint(srcVerts[srcTris[t + 2]]);
+                            Vector3 n  = Vector3.Cross(wB - wA, wC - wA);
+                            if (n.sqrMagnitude > 1e-10f)
+                            {
+                                referenceNormal += new Vector3d(n.x, n.y, n.z);
+                                sampleCount++;
+                            }
                         }
+                        if (sampleCount > 0) referenceNormal.Normalize();
                     }
+                }
 
-                    // Tính signed volume của component
-                    double totalSignedVolume = 0;
-                    foreach (int tid in comp)
+                if (referenceNormal.LengthSquared > 0.01)
+                {
+                    // Tính average normal của compacted (world space, tối đa 16 tam giác)
+                    Vector3d compactedNormal = Vector3d.Zero;
+                    int sampleC = 0;
+                    foreach (int tid in compacted.TriangleIndices())
                     {
-                        if (!compacted.IsTriangle(tid)) continue;
+                        if (!compacted.IsTriangle(tid) || sampleC >= 16) continue;
                         Index3i tri = compacted.GetTriangle(tid);
-                        Vector3d vA = compacted.GetVertex(tri.a);
-                        Vector3d vB = compacted.GetVertex(tri.b);
-                        Vector3d vC = compacted.GetVertex(tri.c);
-                        totalSignedVolume += vA.Dot(vB.Cross(vC)) / 6.0;
+                        Vector3d pA = compacted.GetVertex(tri.a);
+                        Vector3d pB = compacted.GetVertex(tri.b);
+                        Vector3d pC = compacted.GetVertex(tri.c);
+                        Vector3d n  = (pB - pA).Cross(pC - pA);
+                        if (n.LengthSquared > 1e-10) { compactedNormal += n; sampleC++; }
                     }
+                    if (sampleC > 0) compactedNormal.Normalize();
 
-                    if (totalSignedVolume < 0)
+                    if (compactedNormal.Dot(referenceNormal) < 0)
                     {
-                        // Flip toàn bộ component
-                        var toFlipD = comp.Where(t => compacted.IsTriangle(t)).ToList();
-                        foreach (int tid in toFlipD)
+                        // Normal ngược chiều gốc → flip toàn bộ mesh
+                        Debug.Log("[MeshSewer] Finalize D: Normal ngược chiều goA → flip toàn mesh.");
+                        foreach (int tid in compacted.TriangleIndices().ToList())
                         {
+                            if (!compacted.IsTriangle(tid)) continue;
                             Index3i tri = compacted.GetTriangle(tid);
                             compacted.RemoveTriangle(tid, false, false);
                             compacted.AppendTriangle(tri.a, tri.c, tri.b);
                         }
+                        compacted = new DMesh3(compacted, bCompact: true);
                         orientationChanged = true;
                     }
+                    else
+                    {
+                        Debug.Log("[MeshSewer] Finalize D: Normal khớp mesh gốc — giữ nguyên.");
+                    }
                 }
-                if (orientationChanged)
-                    compacted = new DMesh3(compacted, bCompact: true);
+                else
+                {
+                    // Không lấy được reference → bỏ qua bước D hoàn toàn
+                    // (an toàn hơn là flip sai bằng signed volume với open mesh)
+                    Debug.LogWarning("[MeshSewer] Finalize D: Không có reference normal từ goA — bỏ qua global orientation.");
+                }
             }
 
             if (orientationChanged)

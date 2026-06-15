@@ -109,7 +109,14 @@ namespace UCloth
                 UCEdge edge2 = GetHashedEdge(mesh, ind2, ind3);
                 UCEdge edge3 = GetHashedEdge(mesh, ind1, ind3);
 
-                trianglesCache.Add(new UCTriangle(edge1.nodeIndex1, edge1.nodeIndex2, edge2.nodeIndex2), i);
+                ushort ta = edge1.nodeIndex1;
+                ushort tb = edge1.nodeIndex2;
+                ushort tc = edge2.nodeIndex2;
+
+                // Store all 3 cyclic rotations so lookup succeeds regardless of vertex order
+                TryAddTriangle(trianglesCache, new UCTriangle(ta, tb, tc), i);
+                TryAddTriangle(trianglesCache, new UCTriangle(tb, tc, ta), i);
+                TryAddTriangle(trianglesCache, new UCTriangle(tc, ta, tb), i);
 
                 // And then create edges from the specified indices
                 CreateEdge(edge1);
@@ -181,12 +188,33 @@ namespace UCloth
 
                 if (commonNeighbours.Count == 2)
                 {
-                    int tri1 = trianglesCache[new UCTriangle(index1, index2, (ushort)commonNeighbours[0])];
-                    int tri2 = trianglesCache[new UCTriangle(index2, index1, (ushort)commonNeighbours[1])];
+                    ushort n0 = (ushort)commonNeighbours[0];
+                    ushort n1 = (ushort)commonNeighbours[1];
 
-                    // Order shouldn't matter here
-                    UCBendingEdge bendingEdge = new(commonNeighbours[0], commonNeighbours[1], tri1, tri2);
-                    bendingEdges.Add(bendingEdge);
+                    bool found1 = trianglesCache.TryGetValue(new UCTriangle(index1, index2, n0), out int tri1)
+                                || trianglesCache.TryGetValue(new UCTriangle(index2, n0, index1), out tri1)
+                                || trianglesCache.TryGetValue(new UCTriangle(n0, index1, index2), out tri1)
+                                || trianglesCache.TryGetValue(new UCTriangle(index2, index1, n0), out tri1)
+                                || trianglesCache.TryGetValue(new UCTriangle(index1, n0, index2), out tri1)
+                                || trianglesCache.TryGetValue(new UCTriangle(n0, index2, index1), out tri1);
+
+                    bool found2 = trianglesCache.TryGetValue(new UCTriangle(index2, index1, n1), out int tri2)
+                                || trianglesCache.TryGetValue(new UCTriangle(index1, n1, index2), out tri2)
+                                || trianglesCache.TryGetValue(new UCTriangle(n1, index2, index1), out tri2)
+                                || trianglesCache.TryGetValue(new UCTriangle(index1, index2, n1), out tri2)
+                                || trianglesCache.TryGetValue(new UCTriangle(index2, n1, index1), out tri2)
+                                || trianglesCache.TryGetValue(new UCTriangle(n1, index1, index2), out tri2);
+
+                    if (found1 && found2)
+                    {
+                        // Order shouldn't matter here
+                        UCBendingEdge bendingEdge = new(commonNeighbours[0], commonNeighbours[1], tri1, tri2);
+                        bendingEdges.Add(bendingEdge);
+                    }
+                    else
+                    {
+                        Debug.LogWarning($"[UCMeshPreprocessor] Could not find triangle in cache for bending edge ({index1},{index2}). Skipping.");
+                    }
                 }
             }
 
@@ -304,6 +332,14 @@ namespace UCloth
 
 
             return false;
+        }
+        /// <summary>
+        /// Adds a triangle to the cache only if the key doesn't already exist.
+        /// </summary>
+        private static void TryAddTriangle(Dictionary<UCTriangle, int> cache, UCTriangle tri, int index)
+        {
+            if (!cache.ContainsKey(tri))
+                cache.Add(tri, index);
         }
     }
 }
