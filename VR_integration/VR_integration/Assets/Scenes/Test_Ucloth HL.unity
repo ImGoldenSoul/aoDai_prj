@@ -4986,7 +4986,7 @@ MonoBehaviour:
   m_PrefabInstance: {fileID: 0}
   m_PrefabAsset: {fileID: 0}
   m_GameObject: {fileID: 357928181}
-  m_Enabled: 1
+  m_Enabled: 0
   m_EditorHideFlags: 0
   m_Script: {fileID: 11500000, guid: aa8a9d48df69c3f42881f23ce1173c3b, type: 3}
   m_Name: 
@@ -18494,14 +18494,28 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   cutter: {fileID: 2018390509783023192}
+  unlimitedRayLength: 1
   rayLength: 3
   showDebugRay: 1
+  sphereCastRadius: 0.015
   clothTag: Cloth
   splitForce: 1.5
   splitOnlyWhenDisconnected: 1
-  minPathPoints: 5
   minPathSpacing: 0.005
-  missFramesToCommit: 3
+  autoCutOnRayExitMesh: 1
+  autoCutMissFrameThreshold: 2
+  cutTriggerKey: 98
+  cancelCutKey: 27
+  cutTriggerAction: {fileID: 0}
+  cancelCutAction: {fileID: 0}
+  cutLineMaterial: {fileID: 0}
+  cutLineWidth: 0.004
+  cutLineColor: {r: 1, g: 0.15, b: 0.05, a: 1}
+  cutLineSurfaceOffset: 0.002
+  showCursorDot: 1
+  cursorDotSize: 0.012
+  verboseDebugLogs: 1
+  rescanInterval: 1
 --- !u!1 &1602418709
 GameObject:
   m_ObjectHideFlags: 0
