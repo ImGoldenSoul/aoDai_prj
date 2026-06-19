@@ -1044,15 +1044,20 @@ public class MeshSewer_UCloth
         }
 
         // ── 5. Khôi phục tương tác Laser Grabber trong VR ──
-        var grabSrc = _goA.GetComponent<UClothLaserGrabber>()
-                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber>());
+        // SỬA: Khôi phục tương tác theo cơ chế của UClothLaserGrabber2 sau khi khâu
+        var grabSrc = _goA.GetComponent<UClothLaserGrabber2>()
+                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber2>());
         if (grabSrc != null)
         {
-            var gr = go.AddComponent<UClothLaserGrabber>();
-            gr.vrController  = grabSrc.vrController;
-            gr.grabSphere    = grabSrc.grabSphere;
-            gr.triggerAction = grabSrc.triggerAction;
-            gr.pullForce     = grabSrc.pullForce;
+            var gr = go.AddComponent<UClothLaserGrabber2>();
+            gr.vrController       = grabSrc.vrController;
+            gr.triggerAction      = grabSrc.triggerAction;
+            gr.rightController    = grabSrc.rightController;
+            gr.rightTriggerAction = grabSrc.rightTriggerAction;
+            gr.pullForce          = grabSrc.pullForce;
+            gr.sphereSize         = grabSrc.sphereSize;
+            gr.hoverColor         = grabSrc.hoverColor;
+            gr.grabColor          = grabSrc.grabColor;
         }
 
         SafeDisableUCloth(_goA);

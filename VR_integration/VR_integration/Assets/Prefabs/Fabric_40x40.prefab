@@ -585,7 +585,6 @@ GameObject:
   - component: {fileID: 7936447627167581637}
   - component: {fileID: 7127964120135178696}
   - component: {fileID: 8780109078698015395}
-  - component: {fileID: 1892484823423816498}
   - component: {fileID: 4225036618344972990}
   m_Layer: 0
   m_Name: Cloth_40
@@ -732,22 +731,6 @@ MeshCollider:
   m_Convex: 0
   m_CookingOptions: 30
   m_Mesh: {fileID: 7629811779324647873, guid: 21c3c03dfe1d1544a94a774cbfe850dd, type: 3}
---- !u!114 &1892484823423816498
-MonoBehaviour:
-  m_ObjectHideFlags: 0
-  m_CorrespondingSourceObject: {fileID: 0}
-  m_PrefabInstance: {fileID: 0}
-  m_PrefabAsset: {fileID: 0}
-  m_GameObject: {fileID: 2211907165372992275}
-  m_Enabled: 1
-  m_EditorHideFlags: 0
-  m_Script: {fileID: 11500000, guid: e033741325d2bbc44bee52aa7b8c41e4, type: 3}
-  m_Name: 
-  m_EditorClassIdentifier: 
-  vrController: {fileID: 0}
-  grabSphere: {fileID: 0}
-  triggerAction: {fileID: -6131295136447488360, guid: c348712bda248c246b8c49b3db54643f, type: 3}
-  pullForce: 50
 --- !u!114 &4225036618344972990
 MonoBehaviour:
   m_ObjectHideFlags: 0
@@ -760,7 +743,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: fb6bb97573dfda040ac9768afba30d56, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  grabber: {fileID: 1892484823423816498}
+  grabber: {fileID: 0}
   pinAction: {fileID: 1855836014308820768, guid: c348712bda248c246b8c49b3db54643f, type: 3}
   pinForce: 50
 --- !u!1 &6326847152440303827

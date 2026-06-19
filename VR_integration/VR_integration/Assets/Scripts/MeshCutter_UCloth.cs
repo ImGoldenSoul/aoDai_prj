@@ -384,14 +384,19 @@ public class MeshCutter_UCloth
             rb.useGravity  = true;
             rb.isKinematic = true;
 
-            var originalGrabber = _target.GetComponent<UClothLaserGrabber>();
+            // SỬA: Chuyển đổi tính chất sang UClothLaserGrabber2 cho các mảnh con sau khi cắt
+            var originalGrabber = _target.GetComponent<UClothLaserGrabber2>();
             if (originalGrabber != null)
             {
-                var newGrabber          = piece.AddComponent<UClothLaserGrabber>();
-                newGrabber.vrController  = originalGrabber.vrController;
-                newGrabber.grabSphere    = originalGrabber.grabSphere;
-                newGrabber.triggerAction = originalGrabber.triggerAction;
-                newGrabber.pullForce     = originalGrabber.pullForce;
+                var newGrabber = piece.AddComponent<UClothLaserGrabber2>();
+                newGrabber.vrController       = originalGrabber.vrController;
+                newGrabber.triggerAction      = originalGrabber.triggerAction;
+                newGrabber.rightController    = originalGrabber.rightController;
+                newGrabber.rightTriggerAction = originalGrabber.rightTriggerAction;
+                newGrabber.pullForce          = originalGrabber.pullForce;
+                newGrabber.sphereSize         = originalGrabber.sphereSize;
+                newGrabber.hoverColor         = originalGrabber.hoverColor;
+                newGrabber.grabColor          = originalGrabber.grabColor;
             }
 
             Debug.Log($"[MeshCutter_UCloth] Piece '{name}': UCCloth added, {mesh.vertexCount} verts, {tc} tris.");

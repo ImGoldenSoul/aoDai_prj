@@ -1,10 +1,11 @@
 // ============================================================
-//  CuttingManager_UCloth.cs  — v12.0 (Fix Alignment & Close Penetration)
+//  CuttingManager_UCloth.cs  — v13.1 (Trigger Hold UI Prompt)
 // ============================================================
 
 using System.Collections;
 using System.Collections.Generic;
 using UnityEngine;
+using UnityEngine.XR.Interaction.Toolkit;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -12,30 +13,34 @@ using UnityEngine.InputSystem;
 public class CuttingManager_UCloth : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("Transform đầu công cụ cắt — ray được bắn từ đây.")]
     public Transform cutter;
 
     [Header("Ray Settings")]
-    [Tooltip("Chiều dài tia ảo để dựng 'mặt phẳng cắt' xuyên qua mesh.")]
     public float rayLength = 3f;
     public bool showDebugRay = true;
 
     [Header("Cut Settings")]
     public string clothTag = "Cloth";
     public float splitForce = 1.5f;
-    [Tooltip("Nếu TRUE: chỉ tách khi đường cắt thực sự chia mesh thành ≥ 2 vùng.")]
     public bool splitOnlyWhenDisconnected = true;
-    [Tooltip("Khoảng cách tối thiểu giữa 2 điểm vẽ liên tiếp trong không gian (m).")]
     public float minVisualSpacing = 0.01f;
-    [Tooltip("Chiều dài tối thiểu của đường nét visual (m) để kích hoạt cắt.")]
     public float minCutPathLength = 0.04f;
 
-    [Header("Hold-Trigger-To-Draw / Release-To-Cut")]
+    [Header("Strict Multi-Trigger Mapping")]
     public KeyCode cutTriggerKey = KeyCode.Mouse0;
-    public KeyCode cancelCutKey = KeyCode.Escape;
+    public KeyCode cutCancelKey  = KeyCode.Escape;
+    public KeyCode drawStrokeKey = KeyCode.Mouse1;
+
 #if ENABLE_INPUT_SYSTEM
-    public InputActionReference cutTriggerAction;
-    public InputActionReference cancelCutAction;
+    [Header("New Input System Actions (Supports Both Controllers)")]
+    public InputActionReference leftCutTriggerAction;
+    public InputActionReference rightCutTriggerAction;
+    
+    public InputActionReference leftCancelCutAction;
+    public InputActionReference rightCancelCutAction;
+
+    public InputActionReference leftDrawStrokeAction;
+    public InputActionReference rightDrawStrokeAction;
 #endif
 
     [Header("Cut Line Visual")]
@@ -43,17 +48,24 @@ public class CuttingManager_UCloth : MonoBehaviour
     public float cutLineWidth = 0.004f;
     public Color cutLineColor = new Color(1f, 0.15f, 0.05f, 1f);
 
-    // Chỉ lưu chuỗi các điểm vị trí chính xác của đầu dao (Không dùng hướng forward xoay góc của tay)
+    private LineRenderer _cutLine;
+
     private readonly List<Vector3> _visualStrokePoints = new List<Vector3>();
-    // Lưu hướng forward trung bình của cả nhát chém để dựng mặt phẳng chiếu đồng bộ
     private Vector3 _averageStrokeForward = Vector3.forward;
 
     private readonly Dictionary<GameObject, MeshCutter_UCloth> _cutters = new Dictionary<GameObject, MeshCutter_UCloth>();
     private readonly HashSet<GameObject> _ucClothObjects = new HashSet<GameObject>();
 
-    private LineRenderer _cutLine;
     private float _rescanTimer;
     public float rescanInterval = 1f;
+
+    // Tham chiếu XRGrabInteractable gắn trên cutter để biết tay có đang cầm kéo hay không
+    private XRGrabInteractable _cutterGrab;
+
+    // Quản lý trạng thái UI hiển thị
+    private string _uiDisplayMessage = "";
+    private float _uiMessageTimer = 0f;
+    private bool _isInCutMode = false;
 
     void Start()
     {
@@ -63,6 +75,11 @@ public class CuttingManager_UCloth : MonoBehaviour
             enabled = false;
             return;
         }
+
+        _cutterGrab = cutter.GetComponent<XRGrabInteractable>();
+        if (_cutterGrab == null)
+            Debug.LogWarning("[CuttingManager_UCloth] Không tìm thấy XRGrabInteractable trên cutter — text trạng thái cutting mode sẽ không hiển thị.");
+
         RegisterAllClothObjects();
         SetupCutLineVisual();
     }
@@ -97,45 +114,118 @@ public class CuttingManager_UCloth : MonoBehaviour
         _cutLine.enabled = false;
     }
 
+    /// <summary>Kiểm tra tay (controller) có đang thực sự cầm/grab tool cắt hay không.</summary>
+    private bool IsToolGrabbed()
+    {
+        return _cutterGrab != null && _cutterGrab.isSelected;
+    }
+
     void LateUpdate()
     {
         if (cutter == null) return;
 
-        bool triggerHeldNow = IsTriggerHeld();
         bool triggerPressedThisFrame = IsTriggerPressedThisFrame();
-        bool triggerReleasedThisFrame = IsTriggerReleasedThisFrame();
+        bool cancelPressed = IsCancelPressedThisFrame();
+        bool drawHeldNow = IsDrawHeldNow();
+        bool drawReleasedThisFrame = IsDrawReleasedThisFrame();
 
+        if (_uiMessageTimer > 0f)
+        {
+            _uiMessageTimer -= Time.deltaTime;
+            if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
+        }
+
+        // TRIGGER GIỜ HOẠT ĐỘNG NHƯ NÚT BẤM (TOGGLE), KHÔNG CẦN GIỮ:
+        // - Bấm trigger (khi đang cầm tool) -> bật/tắt chế độ cắt.
+        // - Việc cắt KHÔNG cần bấm trigger lần 2 nữa — vẽ xong (nhả nút draw) là cắt luôn.
         if (triggerPressedThisFrame)
         {
-            _visualStrokePoints.Clear();
-            _visualStrokePoints.Add(cutter.position);
-            _averageStrokeForward = cutter.forward;
-        }
-        else if (triggerHeldNow)
-        {
-            Vector3 currentPos = cutter.position;
-            if (_visualStrokePoints.Count == 0 || Vector3.Distance(_visualStrokePoints[_visualStrokePoints.Count - 1], currentPos) > minVisualSpacing)
+            if (!_isInCutMode)
             {
-                _visualStrokePoints.Add(currentPos);
-                // Tích lũy cộng dồn để lấy hướng forward trung bình, tránh hiện tượng lắc tay làm lệch seam
-                _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, cutter.forward, 0.2f);
+                // CHỈ CHO PHÉP BẬT CHẾ ĐỘ CẮT KHI TAY ĐANG THỰC SỰ CẦM/GRAB TOOL CẮT
+                if (IsToolGrabbed())
+                {
+                    ClearStroke();
+                    _averageStrokeForward = cutter.forward;
+                    _isInCutMode = true;
+                }
+            }
+            else
+            {
+                // Bấm trigger lần nữa để thoát chế độ cắt (không cắt, chỉ huỷ bỏ)
+                ClearStroke();
+                _isInCutMode = false;
+
+                _uiDisplayMessage = "";
+                _uiMessageTimer = 0f;
             }
         }
 
-        UpdateVisualLineRenderer();
-
-        if (triggerReleasedThisFrame)
+        if (_isInCutMode)
         {
-            ProcessStrokeCut();
+            // CHỈ GHI ĐIỂM & VẼ LINE KHI ĐANG CẦM TOOL VÀ NÚT DRAW STROKE ĐANG ĐƯỢC GIỮ
+            // (KHÔNG CẦN GIỮ TRIGGER NỮA — CHỈ CẦN ĐÃ BẤM TRIGGER ĐỂ VÀO CHẾ ĐỘ CẮT)
+            if (IsToolGrabbed() && drawHeldNow)
+            {
+                Vector3 currentPos = cutter.position;
+                if (_visualStrokePoints.Count == 0 || Vector3.Distance(_visualStrokePoints[_visualStrokePoints.Count - 1], currentPos) > minVisualSpacing)
+                {
+                    _visualStrokePoints.Add(currentPos);
+                    _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, cutter.forward, 0.2f);
+                }
+
+                UpdateVisualLineRenderer();
+            }
+
+            // VẼ XONG (NHẢ NÚT DRAW) -> CẮT NGAY LẬP TỨC, KHÔNG CẦN CHỜ GÌ THÊM
+            if (drawReleasedThisFrame && IsToolGrabbed())
+            {
+                ProcessStrokeCut();
+                // Vẫn ở trong chế độ cắt để có thể vẽ nét cắt tiếp theo ngay,
+                // bấm trigger lần nữa nếu muốn thoát hẳn chế độ cắt.
+            }
+
+            // CHỈ HIỆN TEXT "ĐANG Ở CHẾ ĐỘ CẮT" KHI TAY THỰC SỰ ĐANG GRAB TOOL CẮT
+            if (IsToolGrabbed())
+            {
+                _uiDisplayMessage = drawHeldNow
+                    ? "you are drawing the cut line"
+                    : "you are in the cutting mode, hold draw button to trace the cut line";
+                _uiMessageTimer = 0.1f;
+            }
         }
 
-        if (Input.GetKeyDown(cancelCutKey) || (cancelCutAction != null && cancelCutAction.action.WasPressedThisFrame()))
+        if (cancelPressed && _isInCutMode)
         {
             ClearStroke();
+            _isInCutMode = false;
+            
+            // Hiện thông báo hủy khi kết thúc sớm bằng phím Cancel
+            _uiDisplayMessage = "End cutting mode.";
+            _uiMessageTimer = 3f;
         }
 
         CleanupStaleObjects();
         RescanForNewClothObjects();
+    }
+
+    private void ClearStroke()
+    {
+        _visualStrokePoints.Clear();
+        if (_cutLine != null) _cutLine.enabled = false;
+    }
+
+    private void UpdateVisualLineRenderer()
+    {
+        if (_cutLine == null) return;
+        if (_visualStrokePoints.Count < 2)
+        {
+            _cutLine.enabled = false;
+            return;
+        }
+        _cutLine.enabled = true;
+        _cutLine.positionCount = _visualStrokePoints.Count;
+        _cutLine.SetPositions(_visualStrokePoints.ToArray());
     }
 
     private void ProcessStrokeCut()
@@ -159,16 +249,12 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (target == null || !target.activeInHierarchy) continue;
             if (!_cutters.TryGetValue(target, out var mc) || mc == null) continue;
 
-            // Tiến hành chiếu đường nét thực tế vào Mesh vải
             List<Vector3> dynamicMeshIntersectionPath = ProjectStrokeOntoMesh(target, _visualStrokePoints);
 
             if (dynamicMeshIntersectionPath != null && dynamicMeshIntersectionPath.Count >= 2)
             {
                 mc.ClearPath();
-                foreach (var point in dynamicMeshIntersectionPath)
-                {
-                    mc.ForceAddPathPoint(point);
-                }
+                foreach (var point in dynamicMeshIntersectionPath) mc.ForceAddPathPoint(point);
 
                 var result = mc.CommitCut(splitOnlyWhenDisconnected);
                 if (result == CutResult_Ucloth.Split)
@@ -178,16 +264,14 @@ public class CuttingManager_UCloth : MonoBehaviour
                     _cutters.Remove(target);
                     _ucClothObjects.Remove(target);
 
-                    foreach (var piece in newPieces)
-                    {
-                        RegisterClothObject(piece);
-                    }
+                    foreach (var piece in newPieces) RegisterClothObject(piece);
                     break;
                 }
             }
         }
 
-        ClearStroke();
+        _visualStrokePoints.Clear();
+        if (_cutLine != null) _cutLine.enabled = false;
     }
 
     private List<Vector3> ProjectStrokeOntoMesh(GameObject target, List<Vector3> strokePoints)
@@ -199,32 +283,21 @@ public class CuttingManager_UCloth : MonoBehaviour
         float backupDistance = 20f; 
         float totalScanRange = 40f;
 
-        // FIX LỖI LỆCH TỌA ĐỘ: Định hình hướng chiếu đồng nhất. 
-        // Ưu tiên sử dụng hướng nhìn trực diện của Main Camera để nhát cắt khớp 100% với góc nhìn visual của người dùng.
         Vector3 projectDir = _averageStrokeForward.normalized;
-        if (Camera.main != null)
-        {
-            projectDir = Camera.main.transform.forward;
-        }
+        if (Camera.main != null) projectDir = Camera.main.transform.forward;
 
         for (int i = 0; i < strokePoints.Count; i++)
         {
-            Vector3 origin = strokePoints[i]; // Lấy chuẩn vị trí 3D của visual line hiện tại
-
-            // FIX LỖI CONTROLLER SÁT VẢI/XUYÊN VẢI:
-            // Dù đầu dao nằm ở đâu, ta luôn lùi tâm bắn tia về phía sau góc nhìn camera 20 mét,
-            // bảo đảm tia luôn đi từ ngoài vào và đâm xuyên qua đúng vị trí đường visual line thế giới.
+            Vector3 origin = strokePoints[i];
             Vector3 rayOrigin = origin - projectDir * backupDistance;
             Ray projectionRay = new Ray(rayOrigin, projectDir);
 
-            // Bắn tia xuyên biên mặt trước
             if (collider.Raycast(projectionRay, out RaycastHit hitForward, totalScanRange))
             {
                 intersectPoints.Add(hitForward.point);
             }
             else
             {
-                // Bắn ngược phòng trường hợp topo hở biên bị lật ngược mặt
                 Ray reverseRay = new Ray(origin + projectDir * backupDistance, -projectDir);
                 if (collider.Raycast(reverseRay, out RaycastHit hitReverse, totalScanRange))
                 {
@@ -233,43 +306,26 @@ public class CuttingManager_UCloth : MonoBehaviour
             }
         }
 
-        // Lọc mượt điểm
         var filteredPoints = new List<Vector3>();
         for (int i = 0; i < intersectPoints.Count; i++)
         {
-            if (filteredPoints.Count == 0)
-            {
-                filteredPoints.Add(intersectPoints[i]);
-            }
+            if (filteredPoints.Count == 0) filteredPoints.Add(intersectPoints[i]);
             else
             {
                 if (Vector3.Distance(filteredPoints[filteredPoints.Count - 1], intersectPoints[i]) > minVisualSpacing * 0.4f)
-                {
                     filteredPoints.Add(intersectPoints[i]);
-                }
             }
         }
 
-        // Ép biên ra rìa Manh vải để luôn chia đôi Manh vải thành công
-        // =========================================================================
-        // FIX LỖI NaN / INVALID AABB: ÉP BIÊN THÍCH NGHI THEO KÍCH THƯỚC MESH
-        // =========================================================================
         if (filteredPoints.Count >= 2)
         {
-            // Tính toán kích thước Bounding Box hiện tại của Collider để lấy ngưỡng thích nghi
             Bounds targetBounds = collider.bounds;
-            
-            // Lấy kích thước lớn nhất của mảnh vải làm chuẩn (tránh trường hợp mảnh vải quá nhỏ)
             float maxExttent = Mathf.Max(targetBounds.size.x, targetBounds.size.y, targetBounds.size.z);
-            
-            // Hệ số ép biên an toàn bằng 20% kích thước tổng thể của mảnh vải hiện tại, tối đa không quá 0.3m và tối thiểu không dưới 0.01m (1cm)
             float adaptiveOffset = Mathf.Clamp(maxExttent * 0.2f, 0.01f, 0.3f);
 
-            // Nội suy hướng kéo dài dựa trên vector mút đầu và mút cuối của nét chém
             Vector3 startDir = (filteredPoints[1] - filteredPoints[0]).normalized;
             Vector3 endDir = (filteredPoints[filteredPoints.Count - 1] - filteredPoints[filteredPoints.Count - 2]).normalized;
 
-            // Kéo dài hai đầu mút một khoảng thích nghi vừa đủ để vượt qua biên mà không làm tràn số hình học g3
             Vector3 startExt = filteredPoints[0] - startDir * adaptiveOffset;
             Vector3 endExt = filteredPoints[filteredPoints.Count - 1] + endDir * adaptiveOffset;
             
@@ -280,51 +336,67 @@ public class CuttingManager_UCloth : MonoBehaviour
         return filteredPoints;
     }
 
-    private void ClearStroke()
-    {
-        _visualStrokePoints.Clear();
-        _cutLine.enabled = false;
-    }
-
-    private void UpdateVisualLineRenderer()
-    {
-        if (_cutLine == null) return;
-        if (_visualStrokePoints.Count < 2)
-        {
-            _cutLine.enabled = false;
-            return;
-        }
-        _cutLine.enabled = true;
-        _cutLine.positionCount = _visualStrokePoints.Count;
-        _cutLine.SetPositions(_visualStrokePoints.ToArray());
-    }
-
     private bool IsTriggerHeld()
     {
         bool held = Input.GetKey(cutTriggerKey);
 #if ENABLE_INPUT_SYSTEM
-        if (cutTriggerAction != null && cutTriggerAction.action != null) held |= cutTriggerAction.action.IsPressed();
+        if (leftCutTriggerAction?.action != null) held |= leftCutTriggerAction.action.IsPressed();
+        if (rightCutTriggerAction?.action != null) held |= rightCutTriggerAction.action.IsPressed();
 #endif
         return held;
     }
+
     private bool IsTriggerPressedThisFrame()
     {
         bool pressed = Input.GetKeyDown(cutTriggerKey);
 #if ENABLE_INPUT_SYSTEM
-        if (cutTriggerAction != null && cutTriggerAction.action != null) pressed |= cutTriggerAction.action.WasPressedThisFrame();
+        if (leftCutTriggerAction?.action != null) pressed |= leftCutTriggerAction.action.WasPressedThisFrame();
+        if (rightCutTriggerAction?.action != null) pressed |= rightCutTriggerAction.action.WasPressedThisFrame();
 #endif
         return pressed;
     }
+
     private bool IsTriggerReleasedThisFrame()
     {
         bool released = Input.GetKeyUp(cutTriggerKey);
 #if ENABLE_INPUT_SYSTEM
-        if (cutTriggerAction != null && cutTriggerAction.action != null) released |= cutTriggerAction.action.WasReleasedThisFrame();
+        if (leftCutTriggerAction?.action != null) released |= leftCutTriggerAction.action.WasReleasedThisFrame();
+        if (rightCutTriggerAction?.action != null) released |= rightCutTriggerAction.action.WasReleasedThisFrame();
 #endif
         return released;
     }
 
-    private void RegisterAllClothObjects()
+    private bool IsDrawHeldNow()
+    {
+        bool held = Input.GetKey(drawStrokeKey);
+#if ENABLE_INPUT_SYSTEM
+        if (leftDrawStrokeAction?.action != null) held |= leftDrawStrokeAction.action.IsPressed();
+        if (rightDrawStrokeAction?.action != null) held |= rightDrawStrokeAction.action.IsPressed();
+#endif
+        return held;
+    }
+
+    private bool IsDrawReleasedThisFrame()
+    {
+        bool released = Input.GetKeyUp(drawStrokeKey);
+#if ENABLE_INPUT_SYSTEM
+        if (leftDrawStrokeAction?.action != null) released |= leftDrawStrokeAction.action.WasReleasedThisFrame();
+        if (rightDrawStrokeAction?.action != null) released |= rightDrawStrokeAction.action.WasReleasedThisFrame();
+#endif
+        return released;
+    }
+
+    private bool IsCancelPressedThisFrame()
+    {
+        bool pressed = Input.GetKeyDown(cutCancelKey);
+#if ENABLE_INPUT_SYSTEM
+        if (leftCancelCutAction?.action != null) pressed |= leftCancelCutAction.action.WasPressedThisFrame();
+        if (rightCancelCutAction?.action != null) pressed |= rightCancelCutAction.action.WasPressedThisFrame();
+#endif
+        return pressed;
+    }
+
+    public void RegisterAllClothObjects()
     {
         foreach (var obj in GameObject.FindGameObjectsWithTag(clothTag)) RegisterClothObject(obj);
     }
@@ -365,9 +437,7 @@ public class CuttingManager_UCloth : MonoBehaviour
     {
         var ucCloth = obj.GetComponent<UCloth.UCCloth>();
         if (ucCloth == null) yield break;
-
         float timeout = 1.5f;
-        bool simReady = false;
 
         while (timeout > 0f)
         {
@@ -376,12 +446,7 @@ public class CuttingManager_UCloth : MonoBehaviour
             {
                 yield return new WaitForSeconds(0.05f); 
                 if (obj == null) yield break;
-
-                if (IsSimDataFinite(ucCloth))
-                {
-                    simReady = true;
-                    break;
-                }
+                if (IsSimDataFinite(ucCloth)) break;
             }
             timeout -= Time.deltaTime;
             yield return null;
@@ -409,5 +474,21 @@ public class CuttingManager_UCloth : MonoBehaviour
             RegisterClothObject(obj);
         }
     }
-}
 
+    private void OnGUI()
+    {
+        if (string.IsNullOrEmpty(_uiDisplayMessage)) return;
+
+        GUIStyle style = new GUIStyle();
+        style.alignment = TextAnchor.MiddleCenter;
+        style.fontSize = 28;
+
+        // Vẽ viền đổ bóng đen
+        style.normal.textColor = Color.black;
+        GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 152, 600, 50), _uiDisplayMessage, style);
+        GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 148, 600, 50), _uiDisplayMessage, style);
+        
+        style.normal.textColor = Color.red; 
+        GUI.Label(new Rect(Screen.width / 2 - 300, Screen.height - 150, 600, 50), _uiDisplayMessage, style);
+    }
+}
