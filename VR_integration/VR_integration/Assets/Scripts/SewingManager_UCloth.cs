@@ -149,7 +149,6 @@ public class SewingManager_UCloth : MonoBehaviour
                 break;
         }
     }
-
     private bool TryInitializeSewingSession()
     {
         HashSet<GameObject> targetClothes = FindClothesNearSewer();
@@ -172,8 +171,17 @@ public class SewingManager_UCloth : MonoBehaviour
         Vector3 initialHit = sewer.transform.position;
         if (Physics.Raycast(initialRay, out RaycastHit hit, rayLength)) initialHit = hit.point;
 
-        _sewerSession.Initialize(initialHit, initialHit, sewRadius);
-        return true;
+        // SỬA TẠI ĐÂY: Trả về kết quả khởi tạo thực tế thay vì luôn return true
+        bool initSuccess = _sewerSession.Initialize(initialHit, initialHit, sewRadius);
+        
+        if (!initSuccess)
+        {
+            Debug.LogWarning("[SewingManager] Không thể khởi tạo MeshSewer (có thể do điểm bắt đầu quá xa mép vải).");
+            _sewerSession = null;
+            _targetObjA = _targetObjB = null;
+        }
+        
+        return initSuccess;
     }
 
     private void HandleStrokeDrawing()
