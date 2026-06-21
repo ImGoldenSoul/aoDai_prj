@@ -4795,6 +4795,7 @@ GameObject:
   - component: {fileID: 357928182}
   - component: {fileID: 357928188}
   - component: {fileID: 357928189}
+  - component: {fileID: 357928190}
   m_Layer: 0
   m_Name: Cloth_02
   m_TagString: Cloth
@@ -4998,6 +4999,25 @@ MonoBehaviour:
   sphereSize: 0.03
   hoverColor: {r: 1, g: 0, b: 0.07585335, a: 0.62352943}
   grabColor: {r: 0, g: 1, b: 0, a: 1}
+--- !u!114 &357928190
+MonoBehaviour:
+  m_ObjectHideFlags: 0
+  m_CorrespondingSourceObject: {fileID: 0}
+  m_PrefabInstance: {fileID: 0}
+  m_PrefabAsset: {fileID: 0}
+  m_GameObject: {fileID: 357928181}
+  m_Enabled: 0
+  m_EditorHideFlags: 0
+  m_Script: {fileID: 11500000, guid: 65783c64b8fd76946bc01497a9732576, type: 3}
+  m_Name: 
+  m_EditorClassIdentifier: 
+  grabber: {fileID: 357928182}
+  mannequinAnchor: {fileID: 0}
+  pinAction: {fileID: -4289430672226363583, guid: c348712bda248c246b8c49b3db54643f, type: 3}
+  pinForce: 50
+  pinDamping: 14
+  maxPinSpeed: 8
+  snapThreshold: 0.001
 --- !u!1 &375522399
 GameObject:
   m_ObjectHideFlags: 0
@@ -8480,17 +8500,21 @@ MonoBehaviour:
   sewer: {fileID: 1257713636}
   cuttingManager: {fileID: 0}
   rayLength: 3
-  rayRadius: 0.05
   showDebugRay: 1
   clothTag: Cloth
   weldThreshold: 0.008
   sewRadius: 0.05
   edgesPerFrame: 3
-  immediateWeld: 0
-  useSecondaryRayForSelfSew: 1
-  selfSewSearchRadius: 0.3
-  useAutoFinalize: 1
-  autoFinalizeDelay: 1.5
+  minVisualSpacing: 0.01
+  startSewModeKey: 32
+  drawStrokeKey: 323
+  cancelSewModeKey: 27
+  leftStartModeAction: {fileID: 0}
+  rightStartModeAction: {fileID: 0}
+  leftDrawStrokeAction: {fileID: 0}
+  rightDrawStrokeAction: {fileID: 0}
+  leftCancelModeAction: {fileID: 0}
+  rightCancelModeAction: {fileID: 0}
 --- !u!1 &684171625
 GameObject:
   m_ObjectHideFlags: 0
@@ -18498,10 +18522,26 @@ MonoBehaviour:
   m_Name: 
   m_EditorClassIdentifier: 
   cutter: {fileID: 176587057}
-  checkInterval: 3
-  splitOnlyWhenDisconnected: 1
-  splitForce: 1.5
+  rayLength: 3
+  showDebugRay: 1
   clothTag: Cloth
+  splitForce: 1.5
+  splitOnlyWhenDisconnected: 1
+  minVisualSpacing: 0.01
+  minCutPathLength: 0.04
+  cutTriggerKey: 323
+  cutCancelKey: 27
+  drawStrokeKey: 324
+  leftCutTriggerAction: {fileID: 0}
+  rightCutTriggerAction: {fileID: 0}
+  leftCancelCutAction: {fileID: 0}
+  rightCancelCutAction: {fileID: 0}
+  leftDrawStrokeAction: {fileID: 0}
+  rightDrawStrokeAction: {fileID: 0}
+  cutLineMaterial: {fileID: 0}
+  cutLineWidth: 0.004
+  cutLineColor: {r: 1, g: 0.15, b: 0.05, a: 1}
+  rescanInterval: 1
 --- !u!1 &1602418709
 GameObject:
   m_ObjectHideFlags: 0
