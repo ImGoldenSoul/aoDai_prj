@@ -1,8 +1,9 @@
 // ============================================================
-//  SewingManager_UCloth.cs  — v10.0 (UI Prompt & Multi-Trigger Input)
+//  SewingManager_UCloth.cs  — v11.0 (User Study Integrated)
 // ============================================================
 
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
 using System.Linq;
@@ -55,12 +56,15 @@ public class SewingManager_UCloth : MonoBehaviour
     private Vector3 _averageStrokeForward = Vector3.forward;
     private bool _isDrawingActive = false;
 
-    // Trạng thái chuỗi Text hiển thị UI overlay
     private string _uiDisplayMessage = "";
     private float _uiMessageTimer = 0f;
-
-    // Tham chiếu XRGrabInteractable gắn trên sewer để biết tay có đang cầm kim hay không
     private XRGrabInteractable _sewerGrab;
+
+    // ── DATA METRICS FOR USER STUDY ──
+    private float _modeStartTime;
+    private int _fpsFrameCount;
+    private float _fpsAccumulatedTime;
+    private List<float> _precisionErrors = new List<float>();
 
     void Start()
     {
@@ -78,10 +82,23 @@ public class SewingManager_UCloth : MonoBehaviour
         Debug.Log("<color=cyan>[SewingManager]</color> Hệ thống sẵn sàng.");
     }
 
-    /// <summary>Kiểm tra tay (controller) có đang thực sự cầm/grab tool khâu hay không.</summary>
     private bool IsToolGrabbed()
     {
         return _sewerGrab != null && _sewerGrab.isSelected;
+    }
+
+    private void SetLocomotionEnabled(bool enabledState)
+    {
+        var providers = FindObjectsOfType<MonoBehaviour>();
+        foreach (var provider in providers)
+        {
+            string typeName = provider.GetType().Name;
+            if (typeName.Contains("MoveProvider") || typeName.Contains("TurnProvider") || 
+                typeName.Contains("TeleportationProvider") || typeName.Contains("LocomotionSystem"))
+            {
+                provider.enabled = enabledState;
+            }
+        }
     }
 
     void LateUpdate()
@@ -92,7 +109,6 @@ public class SewingManager_UCloth : MonoBehaviour
         bool wantsToCancel = IsCancelPressedThisFrame();
         bool isDrawHeld    = IsDrawHeldNow();
 
-        // Đếm ngược thời gian ẩn text thông báo kết thúc
         if (_uiMessageTimer > 0f)
         {
             _uiMessageTimer -= Time.deltaTime;
@@ -110,25 +126,38 @@ public class SewingManager_UCloth : MonoBehaviour
                         _currentStrokePoints.Clear();
                         _isDrawingActive = false;
                         
-                        // CHỈ HIỆN TEXT "ĐANG Ở CHẾ ĐỘ KHÂU" KHI TAY THỰC SỰ ĐANG GRAB TOOL KHÂU
+                        // Khởi động các bộ đếm User Study
+                        _modeStartTime = Time.time;
+                        _fpsFrameCount = 0;
+                        _fpsAccumulatedTime = 0f;
+                        _precisionErrors.Clear();
+
+                        // Khóa góc nhìn, tránh lỗi dịch chuyển Viewport ngoài ý muốn
+                        SetLocomotionEnabled(false);
+
                         if (IsToolGrabbed())
                         {
                             _uiDisplayMessage = "You are in sewing mode, press B/Y on the controller to end sewing mode";
-                            _uiMessageTimer = float.MaxValue; // Giữ vô hạn cho tới khi cancel
+                            _uiMessageTimer = float.MaxValue; 
                         }
                     }
                 }
                 break;
 
             case SewingState.SewingModeActive:
+                // Theo dõi dữ liệu FPS trong suốt quá trình xử lý khâu
+                _fpsFrameCount++;
+                _fpsAccumulatedTime += Time.unscaledDeltaTime;
+
                 if (wantsToCancel)
                 {
+                    ExportUserStudyData();
                     FinalizeSewingSession();
                     _currentState = SewingState.Idle;
+                    SetLocomotionEnabled(true);
                     
-                    // Cập nhật text UI khi thoát
                     _uiDisplayMessage = "End sew mode, your mesh is sewn.";
-                    _uiMessageTimer = 4.0f; // Hiển thị dòng chữ trong 4 giây rồi ẩn
+                    _uiMessageTimer = 4.0f;
                     break;
                 }
 
@@ -149,6 +178,7 @@ public class SewingManager_UCloth : MonoBehaviour
                 break;
         }
     }
+
     private bool TryInitializeSewingSession()
     {
         HashSet<GameObject> targetClothes = FindClothesNearSewer();
@@ -171,7 +201,6 @@ public class SewingManager_UCloth : MonoBehaviour
         Vector3 initialHit = sewer.transform.position;
         if (Physics.Raycast(initialRay, out RaycastHit hit, rayLength)) initialHit = hit.point;
 
-        // SỬA TẠI ĐÂY: Trả về kết quả khởi tạo thực tế thay vì luôn return true
         bool initSuccess = _sewerSession.Initialize(initialHit, initialHit, sewRadius);
         
         if (!initSuccess)
@@ -205,6 +234,11 @@ public class SewingManager_UCloth : MonoBehaviour
 
         if (projA != null && projA.Count > 0 && projB != null && projB.Count > 0)
         {
+            // Tính khoảng cách sai lệch Precision giữa kim/controller và trung điểm đường chỉ trên vải
+            Vector3 midSeamPoint = (projA[0] + projB[0]) * 0.5f;
+            float errorDist = Vector3.Distance(rawPoint, midSeamPoint);
+            _precisionErrors.Add(errorDist);
+
             _sewerSession.AddSeam(projA[0], projB[0], sewRadius);
             _sewerSession.UpdateLiveVisuals();
         }
@@ -224,6 +258,35 @@ public class SewingManager_UCloth : MonoBehaviour
 
         _sewerSession = null;
         _targetObjA = _targetObjB = null;
+    }
+
+    private void ExportUserStudyData()
+    {
+        float duration = Time.time - _modeStartTime;
+        float avgFps = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
+        float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
+
+        int fileIndex = 1;
+        string fileName = "";
+        do
+        {
+            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_sew_{fileIndex:D3}.csv");
+            fileIndex++;
+        } while (File.Exists(fileName));
+
+        try
+        {
+            using (StreamWriter sw = new StreamWriter(fileName))
+            {
+                sw.WriteLine("Experiment Name,Average FPS,Time (s),Sew Precision Error (m)");
+                sw.WriteLine($"sew,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
+            }
+            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm thành công: {fileName}");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[UserStudy] Lỗi xuất CSV file: {e.Message}");
+        }
     }
 
     private HashSet<GameObject> FindClothesNearSewer()
@@ -272,7 +335,6 @@ public class SewingManager_UCloth : MonoBehaviour
         return intersectPoints;
     }
 
-    // ── HỆ THỐNG KIỂM TRA PHÍM TOÀN DIỆN CHO CẢ 2 TAY VÀ BÀN PHÍM ──
     private bool IsStartPressedThisFrame()
     {
         bool pressed = Input.GetKeyDown(startSewModeKey);
@@ -317,7 +379,6 @@ public class SewingManager_UCloth : MonoBehaviour
         if (cuttingManager != null) cuttingManager.RegisterClothObject(sewn);
     }
 
-    // Vẽ văn bản lên màn hình chính (Tương thích tốt với cả kính VR qua kính dựng/Canvas nếu cần)
     private void OnGUI()
     {
         if (string.IsNullOrEmpty(_uiDisplayMessage)) return;
@@ -327,7 +388,6 @@ public class SewingManager_UCloth : MonoBehaviour
         style.fontSize = 28;
         style.normal.textColor = Color.white;
 
-        // Vẽ viền đen cho chữ nổi bật hơn
         style.normal.textColor = Color.black;
         GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 102, 600, 50), _uiDisplayMessage, style);
         GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 98, 600, 50), _uiDisplayMessage, style);

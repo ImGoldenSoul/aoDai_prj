@@ -20696,7 +20696,7 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: 29cbbd8c5bac27148994fc4c9aa1a133, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
-  fabricPrefab: {fileID: 1210461725}
+  fabricPrefab: {fileID: 1647336474}
   spawnPoint: {fileID: 1643557199}
   spawnOffset: {x: 0.95, y: 0, z: 0}
   spawnedFabrics: []

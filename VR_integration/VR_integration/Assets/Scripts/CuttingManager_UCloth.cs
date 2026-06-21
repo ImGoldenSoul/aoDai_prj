@@ -1,11 +1,13 @@
 // ============================================================
-//  CuttingManager_UCloth.cs  — v13.1 (Trigger Hold UI Prompt)
+//  CuttingManager_UCloth.cs  — v14.0 (User Study Integrated)
 // ============================================================
 
 using System.Collections;
 using System.Collections.Generic;
+using System.IO;
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
+using System.Linq;
 #if ENABLE_INPUT_SYSTEM
 using UnityEngine.InputSystem;
 #endif
@@ -49,7 +51,6 @@ public class CuttingManager_UCloth : MonoBehaviour
     public Color cutLineColor = new Color(1f, 0.15f, 0.05f, 1f);
 
     private LineRenderer _cutLine;
-
     private readonly List<Vector3> _visualStrokePoints = new List<Vector3>();
     private Vector3 _averageStrokeForward = Vector3.forward;
 
@@ -59,13 +60,16 @@ public class CuttingManager_UCloth : MonoBehaviour
     private float _rescanTimer;
     public float rescanInterval = 1f;
 
-    // Tham chiếu XRGrabInteractable gắn trên cutter để biết tay có đang cầm kéo hay không
     private XRGrabInteractable _cutterGrab;
-
-    // Quản lý trạng thái UI hiển thị
     private string _uiDisplayMessage = "";
     private float _uiMessageTimer = 0f;
     private bool _isInCutMode = false;
+
+    // ── DATA METRICS FOR USER STUDY ──
+    private float _modeStartTime;
+    private int _fpsFrameCount;
+    private float _fpsAccumulatedTime;
+    private List<float> _precisionErrors = new List<float>();
 
     void Start()
     {
@@ -77,9 +81,6 @@ public class CuttingManager_UCloth : MonoBehaviour
         }
 
         _cutterGrab = cutter.GetComponent<XRGrabInteractable>();
-        if (_cutterGrab == null)
-            Debug.LogWarning("[CuttingManager_UCloth] Không tìm thấy XRGrabInteractable trên cutter — text trạng thái cutting mode sẽ không hiển thị.");
-
         RegisterAllClothObjects();
         SetupCutLineVisual();
     }
@@ -114,10 +115,24 @@ public class CuttingManager_UCloth : MonoBehaviour
         _cutLine.enabled = false;
     }
 
-    /// <summary>Kiểm tra tay (controller) có đang thực sự cầm/grab tool cắt hay không.</summary>
     private bool IsToolGrabbed()
     {
         return _cutterGrab != null && _cutterGrab.isSelected;
+    }
+
+    /// <summary>Khóa/mở khóa các component di chuyển của VR để tránh Viewport bị dịch chuyển khi bấm nút</summary>
+    private void SetLocomotionEnabled(bool enabledState)
+    {
+        var providers = FindObjectsOfType<MonoBehaviour>();
+        foreach (var provider in providers)
+        {
+            string typeName = provider.GetType().Name;
+            if (typeName.Contains("MoveProvider") || typeName.Contains("TurnProvider") || 
+                typeName.Contains("TeleportationProvider") || typeName.Contains("LocomotionSystem"))
+            {
+                provider.enabled = enabledState;
+            }
+        }
     }
 
     void LateUpdate()
@@ -135,27 +150,32 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
         }
 
-        // TRIGGER GIỜ HOẠT ĐỘNG NHƯ NÚT BẤM (TOGGLE), KHÔNG CẦN GIỮ:
-        // - Bấm trigger (khi đang cầm tool) -> bật/tắt chế độ cắt.
-        // - Việc cắt KHÔNG cần bấm trigger lần 2 nữa — vẽ xong (nhả nút draw) là cắt luôn.
         if (triggerPressedThisFrame)
         {
             if (!_isInCutMode)
             {
-                // CHỈ CHO PHÉP BẬT CHẾ ĐỘ CẮT KHI TAY ĐANG THỰC SỰ CẦM/GRAB TOOL CẮT
                 if (IsToolGrabbed())
                 {
                     ClearStroke();
                     _averageStrokeForward = cutter.forward;
                     _isInCutMode = true;
+
+                    // Bắt đầu đo metric user study
+                    _modeStartTime = Time.time;
+                    _fpsFrameCount = 0;
+                    _fpsAccumulatedTime = 0f;
+                    _precisionErrors.Clear();
+
+                    // Khóa di chuyển hệ thống để giữ nguyên Viewport hiện tại
+                    SetLocomotionEnabled(false);
                 }
             }
             else
             {
-                // Bấm trigger lần nữa để thoát chế độ cắt (không cắt, chỉ huỷ bỏ)
+                ExportUserStudyData();
                 ClearStroke();
                 _isInCutMode = false;
-
+                SetLocomotionEnabled(true);
                 _uiDisplayMessage = "";
                 _uiMessageTimer = 0f;
             }
@@ -163,8 +183,10 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         if (_isInCutMode)
         {
-            // CHỈ GHI ĐIỂM & VẼ LINE KHI ĐANG CẦM TOOL VÀ NÚT DRAW STROKE ĐANG ĐƯỢC GIỮ
-            // (KHÔNG CẦN GIỮ TRIGGER NỮA — CHỈ CẦN ĐÃ BẤM TRIGGER ĐỂ VÀO CHẾ ĐỘ CẮT)
+            // Tính toán FPS liên tục trong chế độ
+            _fpsFrameCount++;
+            _fpsAccumulatedTime += Time.unscaledDeltaTime;
+
             if (IsToolGrabbed() && drawHeldNow)
             {
                 Vector3 currentPos = cutter.position;
@@ -177,15 +199,11 @@ public class CuttingManager_UCloth : MonoBehaviour
                 UpdateVisualLineRenderer();
             }
 
-            // VẼ XONG (NHẢ NÚT DRAW) -> CẮT NGAY LẬP TỨC, KHÔNG CẦN CHỜ GÌ THÊM
             if (drawReleasedThisFrame && IsToolGrabbed())
             {
                 ProcessStrokeCut();
-                // Vẫn ở trong chế độ cắt để có thể vẽ nét cắt tiếp theo ngay,
-                // bấm trigger lần nữa nếu muốn thoát hẳn chế độ cắt.
             }
 
-            // CHỈ HIỆN TEXT "ĐANG Ở CHẾ ĐỘ CẮT" KHI TAY THỰC SỰ ĐANG GRAB TOOL CẮT
             if (IsToolGrabbed())
             {
                 _uiDisplayMessage = drawHeldNow
@@ -197,10 +215,11 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         if (cancelPressed && _isInCutMode)
         {
+            ExportUserStudyData();
             ClearStroke();
             _isInCutMode = false;
+            SetLocomotionEnabled(true);
             
-            // Hiện thông báo hủy khi kết thúc sớm bằng phím Cancel
             _uiDisplayMessage = "End cutting mode.";
             _uiMessageTimer = 3f;
         }
@@ -253,6 +272,14 @@ public class CuttingManager_UCloth : MonoBehaviour
 
             if (dynamicMeshIntersectionPath != null && dynamicMeshIntersectionPath.Count >= 2)
             {
+                // Tính toán Precision Error (khoảng cách sai lệch giữa tay và điểm chạm vật lý tương ứng)
+                int validCount = Mathf.Min(_visualStrokePoints.Count, dynamicMeshIntersectionPath.Count);
+                for (int i = 0; i < validCount; i++)
+                {
+                    float dist = Vector3.Distance(_visualStrokePoints[i], dynamicMeshIntersectionPath[i]);
+                    _precisionErrors.Add(dist);
+                }
+
                 mc.ClearPath();
                 foreach (var point in dynamicMeshIntersectionPath) mc.ForceAddPathPoint(point);
 
@@ -336,14 +363,34 @@ public class CuttingManager_UCloth : MonoBehaviour
         return filteredPoints;
     }
 
-    private bool IsTriggerHeld()
+    private void ExportUserStudyData()
     {
-        bool held = Input.GetKey(cutTriggerKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftCutTriggerAction?.action != null) held |= leftCutTriggerAction.action.IsPressed();
-        if (rightCutTriggerAction?.action != null) held |= rightCutTriggerAction.action.IsPressed();
-#endif
-        return held;
+        float duration = Time.time - _modeStartTime;
+        float avgFps = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
+        float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
+
+        // Tìm số thứ tự tự động tăng cho file để không đè dữ liệu cũ
+        int fileIndex = 1;
+        string fileName = "";
+        do
+        {
+            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_cut_{fileIndex:D3}.csv");
+            fileIndex++;
+        } while (File.Exists(fileName));
+
+        try
+        {
+            using (StreamWriter sw = new StreamWriter(fileName))
+            {
+                sw.WriteLine("Experiment Name,Average FPS,Time (s),Cut Precision Error (m)");
+                sw.WriteLine($"cut,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
+            }
+            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm thành công: {fileName}");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[UserStudy] Lỗi xuất CSV file: {e.Message}");
+        }
     }
 
     private bool IsTriggerPressedThisFrame()
@@ -409,7 +456,6 @@ public class CuttingManager_UCloth : MonoBehaviour
         var instantCutter = new MeshCutter_UCloth(obj, splitForce);
         instantCutter._minPathPointSpacingOverride = minVisualSpacing;
         instantCutter.Initialize();
-        
         _cutters[obj] = instantCutter; 
 
         if (obj.GetComponent<UCloth.UCCloth>() != null)
@@ -483,7 +529,6 @@ public class CuttingManager_UCloth : MonoBehaviour
         style.alignment = TextAnchor.MiddleCenter;
         style.fontSize = 28;
 
-        // Vẽ viền đổ bóng đen
         style.normal.textColor = Color.black;
         GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 152, 600, 50), _uiDisplayMessage, style);
         GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 148, 600, 50), _uiDisplayMessage, style);
