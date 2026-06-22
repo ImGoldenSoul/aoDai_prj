@@ -54,7 +54,7 @@
                     "name": "Secondary Button",
                     "type": "Button",
                     "id": "970b4191-957d-4a7f-ba64-e0e701950d99",
-                    "expectedControlType": "Button",
+                    "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
@@ -63,7 +63,7 @@
                     "name": "Menu",
                     "type": "Button",
                     "id": "ccb35b49-777b-460f-bca8-3168c41cc779",
-                    "expectedControlType": "Button",
+                    "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
@@ -117,7 +117,7 @@
                     "name": "Secondary Touch",
                     "type": "Button",
                     "id": "613de0bf-5bc1-4b53-a4b8-0ae20fb87272",
-                    "expectedControlType": "Button",
+                    "expectedControlType": "",
                     "processors": "",
                     "interactions": "",
                     "initialStateCheck": false
@@ -324,17 +324,6 @@
                 },
                 {
                     "name": "",
-                    "id": "69ce3e33-7d81-423f-b162-7232a5791c2f",
-                    "path": "<Keyboard>/n",
-                    "interactions": "",
-                    "processors": "",
-                    "groups": "",
-                    "action": "Secondary Button",
-                    "isComposite": false,
-                    "isPartOfComposite": false
-                },
-                {
-                    "name": "",
                     "id": "45511393-aa9b-4031-8e31-4eec53ab2d3f",
                     "path": "<Keyboard>/m",
                     "interactions": "",
@@ -407,6 +396,28 @@
                     "processors": "",
                     "groups": "",
                     "action": "Secondary Touch",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "b81fc7e5-a684-4e59-bab6-5cecb5072b97",
+                    "path": "<XRController>{RightHand}/{SecondaryButton}",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Secondary Button",
+                    "isComposite": false,
+                    "isPartOfComposite": false
+                },
+                {
+                    "name": "",
+                    "id": "d181cbff-e11c-4f01-8c8c-f7a0ab1869c6",
+                    "path": "<XRController>{LeftHand}/{SecondaryButton}",
+                    "interactions": "",
+                    "processors": "",
+                    "groups": "",
+                    "action": "Secondary Button",
                     "isComposite": false,
                     "isPartOfComposite": false
                 }
