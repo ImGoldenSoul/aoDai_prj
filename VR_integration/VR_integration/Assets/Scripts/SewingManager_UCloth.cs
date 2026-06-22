@@ -1,11 +1,10 @@
 // ============================================================
-//  SewingManager_UCloth.cs  — v12.0 (Raycast-Only, UserStudy B/C)
+//  SewingManager_UCloth.cs  — v14.0 (Raycast-Only, Auto-Finalize on Idle)
 // ============================================================
 
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
-using UnityEngine.XR.Interaction.Toolkit;
 using System.Linq;
 
 public class SewingManager_UCloth : MonoBehaviour
@@ -25,7 +24,9 @@ public class SewingManager_UCloth : MonoBehaviour
     public int   edgesPerFrame    = 5;
     public float minVisualSpacing = 0.01f;
 
-    // ── User Study Keys ──
+    [Header("Auto-Finalize")]
+    public float idleTimeout = 7f;   // giây không có điểm mới → tự hoàn thành khâu
+
     [Header("User Study")]
     public KeyCode userStudyStartKey = KeyCode.B;
     public KeyCode userStudyEndKey   = KeyCode.C;
@@ -34,16 +35,12 @@ public class SewingManager_UCloth : MonoBehaviour
     private GameObject _targetObjA;
     private GameObject _targetObjB;
 
-    private readonly List<Vector3> _currentStrokePoints = new List<Vector3>();
+    private readonly List<Vector3> _strokePoints = new List<Vector3>();
     private Vector3 _averageStrokeForward = Vector3.forward;
-
-    // ── Ray-based continuous sew tracking ──
     private bool _isRayOnCloth = false;
+    private float _idleTimer = 0f;   // đếm thời gian không có tương tác mới
 
-    private string _uiDisplayMessage = "";
-    private float _uiMessageTimer = 0f;
-
-    // ── DATA METRICS FOR USER STUDY ──
+    // ── User Study ──
     private bool _isCollectingStudyData = false;
     private float _modeStartTime;
     private int _fpsFrameCount;
@@ -52,8 +49,7 @@ public class SewingManager_UCloth : MonoBehaviour
 
     void Start()
     {
-        var clothObjects = GameObject.FindGameObjectsWithTag(clothTag);
-        foreach (var obj in clothObjects)
+        foreach (var obj in GameObject.FindGameObjectsWithTag(clothTag))
             RegisterClothObject(obj);
 
         if (sewer == null)
@@ -66,37 +62,29 @@ public class SewingManager_UCloth : MonoBehaviour
     {
         if (sewer == null) return;
 
-        // ── User Study toggle ──
+        // User Study toggle
         if (Input.GetKeyDown(userStudyStartKey) && !_isCollectingStudyData)
         {
-            _isCollectingStudyData  = true;
-            _modeStartTime          = Time.time;
-            _fpsFrameCount          = 0;
-            _fpsAccumulatedTime     = 0f;
+            _isCollectingStudyData = true;
+            _modeStartTime         = Time.time;
+            _fpsFrameCount         = 0;
+            _fpsAccumulatedTime    = 0f;
             _precisionErrors.Clear();
             Debug.Log("<color=yellow>[UserStudy-Sew]</color> Bắt đầu thu thập dữ liệu.");
         }
-
         if (Input.GetKeyDown(userStudyEndKey) && _isCollectingStudyData)
         {
             ExportUserStudyData();
             _isCollectingStudyData = false;
             Debug.Log("<color=green>[UserStudy-Sew]</color> Kết thúc thu thập dữ liệu.");
         }
-
         if (_isCollectingStudyData)
         {
             _fpsFrameCount++;
             _fpsAccumulatedTime += Time.unscaledDeltaTime;
         }
 
-        if (_uiMessageTimer > 0f)
-        {
-            _uiMessageTimer -= Time.deltaTime;
-            if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
-        }
-
-        // ── Raycast từ sewer liên tục ──
+        // Raycast từ sewer
         Ray ray = new Ray(sewer.transform.position, sewer.transform.forward);
         if (showDebugRay) Debug.DrawRay(sewer.transform.position, sewer.transform.forward * rayLength, Color.cyan);
 
@@ -108,7 +96,6 @@ public class SewingManager_UCloth : MonoBehaviour
             {
                 hitCloth = true;
 
-                // Khởi tạo session nếu chưa có
                 if (!_isRayOnCloth || _sewerSession == null)
                 {
                     _isRayOnCloth = true;
@@ -116,80 +103,86 @@ public class SewingManager_UCloth : MonoBehaviour
                         TryInitializeSewingSession(hit.point);
                 }
 
-                // Thêm điểm stroke
-                Vector3 hitPoint = hit.point;
-                if (_currentStrokePoints.Count == 0 ||
-                    Vector3.Distance(_currentStrokePoints[_currentStrokePoints.Count - 1], hitPoint) > minVisualSpacing)
+                Vector3 p = hit.point;
+                if (_strokePoints.Count == 0 ||
+                    Vector3.Distance(_strokePoints[_strokePoints.Count - 1], p) > minVisualSpacing)
                 {
-                    _currentStrokePoints.Add(hitPoint);
+                    _strokePoints.Add(p);
                     _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, sewer.transform.forward, 0.1f);
-                    InjectPointToLiveMerge(hitPoint);
+                    InjectPointToLiveMerge(p);
                 }
             }
         }
 
         if (!hitCloth && _isRayOnCloth)
         {
-            // Ray rời khỏi cloth → commit sew
             _isRayOnCloth = false;
             FinalizeSewingSession();
         }
 
         if (_sewerSession != null)
+        {
             _sewerSession.Sew();
+
+            // Tự hoàn thiện khâu nếu không có tương tác mới trong idleTimeout giây
+            _idleTimer += Time.deltaTime;
+            if (_idleTimer >= idleTimeout)
+            {
+                Debug.Log("<color=cyan>[SewingManager]</color> Idle timeout — tự hoàn thành khâu.");
+                _isRayOnCloth = false;
+                FinalizeSewingSession();
+            }
+        }
     }
 
     private bool TryInitializeSewingSession(Vector3 startPoint)
     {
-        _currentStrokePoints.Clear();
+        _strokePoints.Clear();
         _averageStrokeForward = sewer.transform.forward;
 
-        HashSet<GameObject> targetClothes = FindClothesNearSewer();
-        if (targetClothes.Count == 0) return false;
+        HashSet<GameObject> clothes = FindClothesNearSewer();
+        if (clothes.Count == 0) return false;
 
-        if (targetClothes.Count >= 2)
+        if (clothes.Count >= 2)
         {
-            var list = targetClothes.ToList();
+            var list = clothes.ToList();
             _targetObjA = list[0]; _targetObjB = list[1];
         }
         else
         {
-            _targetObjA = targetClothes.First(); _targetObjB = _targetObjA;
+            _targetObjA = clothes.First(); _targetObjB = _targetObjA;
         }
 
         _sewerSession = new MeshSewer_UCloth(_targetObjA, _targetObjB, weldThreshold, edgesPerFrame);
         _sewerSession.OnSeamCompleted = RegisterSewnMesh;
+        _idleTimer = 0f;   // bắt đầu session → reset timer
 
-        bool initSuccess = _sewerSession.Initialize(startPoint, startPoint, sewRadius);
-
-        if (!initSuccess)
+        bool ok = _sewerSession.Initialize(startPoint, startPoint, sewRadius);
+        if (!ok)
         {
             Debug.LogWarning("[SewingManager] Không thể khởi tạo MeshSewer.");
             _sewerSession = null;
             _targetObjA = _targetObjB = null;
         }
-
-        return initSuccess;
+        return ok;
     }
 
     private void InjectPointToLiveMerge(Vector3 rawPoint)
     {
         if (_sewerSession == null) return;
 
-        List<Vector3> singlePoint = new List<Vector3> { rawPoint };
-        List<Vector3> projA = ProjectStrokeOntoMesh(_targetObjA, singlePoint);
-        List<Vector3> projB = ProjectStrokeOntoMesh(_targetObjB, singlePoint);
+        List<Vector3> single = new List<Vector3> { rawPoint };
+        List<Vector3> projA  = ProjectStrokeOntoMesh(_targetObjA, single);
+        List<Vector3> projB  = ProjectStrokeOntoMesh(_targetObjB, single);
 
         if (projA != null && projA.Count > 0 && projB != null && projB.Count > 0)
         {
             if (_isCollectingStudyData)
-            {
-                Vector3 midSeamPoint = (projA[0] + projB[0]) * 0.5f;
-                _precisionErrors.Add(Vector3.Distance(rawPoint, midSeamPoint));
-            }
+                _precisionErrors.Add(Vector3.Distance(rawPoint, (projA[0] + projB[0]) * 0.5f));
 
             _sewerSession.AddSeam(projA[0], projB[0], sewRadius);
             _sewerSession.UpdateLiveVisuals();
+            _idleTimer = 0f;   // reset timer mỗi khi có điểm khâu mới
         }
     }
 
@@ -197,25 +190,24 @@ public class SewingManager_UCloth : MonoBehaviour
     {
         if (_sewerSession == null) return;
 
-        _currentStrokePoints.Clear();
+        _strokePoints.Clear();
 
         while (!_sewerSession.Sew()) { }
 
-        string newMeshName = $"{_targetObjA.name}_InteractiveMergedCloth";
-        _sewerSession.Finalize(newMeshName);
+        string name = $"{_targetObjA.name}_InteractiveMergedCloth";
+        _sewerSession.Finalize(name);
 
-        _sewerSession   = null;
+        _sewerSession = null;
         _targetObjA = _targetObjB = null;
     }
 
     private HashSet<GameObject> FindClothesNearSewer()
     {
-        HashSet<GameObject> clothes = new HashSet<GameObject>();
+        var clothes = new HashSet<GameObject>();
         for (int i = -3; i <= 3; i++)
         {
             Vector3 dir = Quaternion.Euler(0, i * 4f, 0) * sewer.transform.forward;
-            Ray r = new Ray(sewer.transform.position, dir);
-            foreach (var h in Physics.RaycastAll(r, rayLength))
+            foreach (var h in Physics.RaycastAll(new Ray(sewer.transform.position, dir), rayLength))
             {
                 var go = h.collider.gameObject;
                 if (go.CompareTag(clothTag) && go.GetComponent<UCloth.UCCloth>() != null)
@@ -230,53 +222,42 @@ public class SewingManager_UCloth : MonoBehaviour
 
     private List<Vector3> ProjectStrokeOntoMesh(GameObject target, List<Vector3> strokePoints)
     {
-        var intersectPoints = new List<Vector3>();
+        var result   = new List<Vector3>();
         var collider = target.GetComponent<Collider>();
         if (collider == null) return null;
 
-        float backupDistance = 10f;
-        float totalScanRange = 20f;
-        Vector3 projectDir   = _averageStrokeForward.normalized;
+        float backup = 10f, range = 20f;
+        Vector3 dir  = _averageStrokeForward.normalized;
 
-        for (int i = 0; i < strokePoints.Count; i++)
+        foreach (var origin in strokePoints)
         {
-            Vector3 origin    = strokePoints[i];
-            Vector3 rayOrigin = origin - projectDir * backupDistance;
-            Ray projectionRay = new Ray(rayOrigin, projectDir);
-
-            if (collider.Raycast(projectionRay, out RaycastHit hitForward, totalScanRange))
-                intersectPoints.Add(hitForward.point);
+            Ray fwd = new Ray(origin - dir * backup, dir);
+            if (collider.Raycast(fwd, out RaycastHit h, range))
+                result.Add(h.point);
         }
-        return intersectPoints;
+        return result;
     }
 
     private void ExportUserStudyData()
     {
-        float duration          = Time.time - _modeStartTime;
-        float avgFps            = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
-        float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
+        float duration = Time.time - _modeStartTime;
+        float avgFps   = _fpsAccumulatedTime > 0f ? _fpsFrameCount / _fpsAccumulatedTime : 0f;
+        float avgErr   = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
 
-        int fileIndex = 1;
-        string fileName = "";
-        do
-        {
-            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_sew_{fileIndex:D3}.csv");
-            fileIndex++;
-        } while (File.Exists(fileName));
+        int idx = 1; string fileName;
+        do { fileName = Path.Combine(Application.persistentDataPath, $"userStudy_sew_{idx++:D3}.csv"); }
+        while (File.Exists(fileName));
 
         try
         {
-            using (StreamWriter sw = new StreamWriter(fileName))
+            using (var sw = new StreamWriter(fileName))
             {
                 sw.WriteLine("Experiment Name,Average FPS,Time (s),Sew Precision Error (m)");
-                sw.WriteLine($"sew,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
+                sw.WriteLine($"sew,{avgFps:F2},{duration:F3},{avgErr:F4}");
             }
             Debug.Log($"<color=green>[UserStudy]</color> Đã xuất: {fileName}");
         }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}");
-        }
+        catch (System.Exception e) { Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}"); }
     }
 
     public void RegisterClothObject(GameObject obj)
@@ -291,21 +272,5 @@ public class SewingManager_UCloth : MonoBehaviour
         RegisterClothObject(sewn);
         if (cuttingManager == null) cuttingManager = FindObjectOfType<CuttingManager_UCloth>();
         if (cuttingManager != null) cuttingManager.RegisterClothObject(sewn);
-    }
-
-    private void OnGUI()
-    {
-        if (string.IsNullOrEmpty(_uiDisplayMessage)) return;
-
-        GUIStyle style = new GUIStyle();
-        style.alignment = TextAnchor.MiddleCenter;
-        style.fontSize  = 28;
-
-        style.normal.textColor = Color.black;
-        GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 102, 600, 50), _uiDisplayMessage, style);
-        GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 98, 600, 50), _uiDisplayMessage, style);
-
-        style.normal.textColor = Color.cyan;
-        GUI.Label(new Rect(Screen.width / 2 - 300, Screen.height - 100, 600, 50), _uiDisplayMessage, style);
     }
 }

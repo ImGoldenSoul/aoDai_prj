@@ -1,12 +1,11 @@
 // ============================================================
-//  CuttingManager_UCloth.cs  — v15.0 (Raycast-Only, UserStudy B/C)
+//  CuttingManager_UCloth.cs  — v16.0 (Raycast-Only, No Visual)
 // ============================================================
 
 using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using UnityEngine;
-using UnityEngine.XR.Interaction.Toolkit;
 using System.Linq;
 
 public class CuttingManager_UCloth : MonoBehaviour
@@ -25,19 +24,9 @@ public class CuttingManager_UCloth : MonoBehaviour
     public float minVisualSpacing = 0.01f;
     public float minCutPathLength = 0.04f;
 
-    [Header("Cut Line Visual")]
-    public Material cutLineMaterial;
-    public float cutLineWidth = 0.004f;
-    public Color cutLineColor = new Color(1f, 0.15f, 0.05f, 1f);
-
-    // ── User Study Keys ──
     [Header("User Study")]
     public KeyCode userStudyStartKey = KeyCode.B;
     public KeyCode userStudyEndKey   = KeyCode.C;
-
-    private LineRenderer _cutLine;
-    private readonly List<Vector3> _visualStrokePoints = new List<Vector3>();
-    private Vector3 _averageStrokeForward = Vector3.forward;
 
     private readonly Dictionary<GameObject, MeshCutter_UCloth> _cutters = new Dictionary<GameObject, MeshCutter_UCloth>();
     private readonly HashSet<GameObject> _ucClothObjects = new HashSet<GameObject>();
@@ -45,14 +34,13 @@ public class CuttingManager_UCloth : MonoBehaviour
     private float _rescanTimer;
     public float rescanInterval = 1f;
 
-    private string _uiDisplayMessage = "";
-    private float _uiMessageTimer = 0f;
-
-    // ── Ray-based continuous cut tracking ──
-    private GameObject _currentRayTarget = null;   // cloth object đang bị ray chiếu vào
+    // ── Ray-based stroke ──
+    private readonly List<Vector3> _strokePoints = new List<Vector3>();
+    private Vector3 _averageStrokeForward = Vector3.forward;
+    private GameObject _currentRayTarget = null;
     private bool _isRayOnCloth = false;
 
-    // ── DATA METRICS FOR USER STUDY ──
+    // ── User Study ──
     private bool _isCollectingStudyData = false;
     private float _modeStartTime;
     private int _fpsFrameCount;
@@ -63,50 +51,18 @@ public class CuttingManager_UCloth : MonoBehaviour
     {
         if (cutter == null)
         {
-            Debug.LogError("[CuttingManager_UCloth] Chưa gán Cutter transform!");
+            Debug.LogError("[CuttingManager] Chưa gán Cutter transform!");
             enabled = false;
             return;
         }
-
         RegisterAllClothObjects();
-        SetupCutLineVisual();
-    }
-
-    private void SetupCutLineVisual()
-    {
-        var lineGo = new GameObject("[3DStrokeVisual]");
-        lineGo.transform.SetParent(transform, false);
-        _cutLine = lineGo.AddComponent<LineRenderer>();
-        _cutLine.useWorldSpace = true;
-        _cutLine.positionCount = 0;
-        _cutLine.widthMultiplier = cutLineWidth;
-        _cutLine.numCapVertices = 4;
-        _cutLine.numCornerVertices = 4;
-        _cutLine.alignment = LineAlignment.View;
-        _cutLine.shadowCastingMode = UnityEngine.Rendering.ShadowCastingMode.Off;
-        _cutLine.receiveShadows = false;
-
-        if (cutLineMaterial == null)
-        {
-            var shader = Shader.Find("Universal Render Pipeline/Unlit") ?? Shader.Find("Unlit/Color");
-            var mat = new Material(shader);
-            if (mat.HasProperty("_BaseColor")) mat.SetColor("_BaseColor", cutLineColor);
-            _cutLine.material = mat;
-        }
-        else
-        {
-            _cutLine.material = cutLineMaterial;
-        }
-        _cutLine.startColor = cutLineColor;
-        _cutLine.endColor   = cutLineColor;
-        _cutLine.enabled    = false;
     }
 
     void LateUpdate()
     {
         if (cutter == null) return;
 
-        // ── User Study toggle ──
+        // User Study toggle
         if (Input.GetKeyDown(userStudyStartKey) && !_isCollectingStudyData)
         {
             _isCollectingStudyData = true;
@@ -116,27 +72,19 @@ public class CuttingManager_UCloth : MonoBehaviour
             _precisionErrors.Clear();
             Debug.Log("<color=yellow>[UserStudy-Cut]</color> Bắt đầu thu thập dữ liệu.");
         }
-
         if (Input.GetKeyDown(userStudyEndKey) && _isCollectingStudyData)
         {
             ExportUserStudyData();
             _isCollectingStudyData = false;
             Debug.Log("<color=green>[UserStudy-Cut]</color> Kết thúc thu thập dữ liệu.");
         }
-
         if (_isCollectingStudyData)
         {
             _fpsFrameCount++;
             _fpsAccumulatedTime += Time.unscaledDeltaTime;
         }
 
-        if (_uiMessageTimer > 0f)
-        {
-            _uiMessageTimer -= Time.deltaTime;
-            if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
-        }
-
-        // ── Raycast từ cutter liên tục ──
+        // Raycast từ cutter
         Ray ray = new Ray(cutter.position, cutter.forward);
         if (showDebugRay) Debug.DrawRay(cutter.position, cutter.forward * rayLength, Color.red);
 
@@ -146,31 +94,24 @@ public class CuttingManager_UCloth : MonoBehaviour
 
             if (hitObj.CompareTag(clothTag) && _cutters.ContainsKey(hitObj))
             {
-                // Nếu bắt đầu chạm cloth mới → reset stroke
-                if (!_isRayOnCloth || _currentRayTarget != hitObj)
-                {
-                    if (_isRayOnCloth && _currentRayTarget != hitObj)
-                        TryCommitCut(_currentRayTarget);
+                // Chuyển sang cloth object mới → commit cut cũ trước
+                if (_isRayOnCloth && _currentRayTarget != hitObj)
+                    TryCommitCut(_currentRayTarget);
 
-                    _isRayOnCloth      = true;
-                    _currentRayTarget  = hitObj;
-                    _averageStrokeForward = cutter.forward;
-                }
+                _isRayOnCloth     = true;
+                _currentRayTarget = hitObj;
 
-                // Thêm điểm vào stroke
-                Vector3 hitPoint = hit.point;
-                if (_visualStrokePoints.Count == 0 ||
-                    Vector3.Distance(_visualStrokePoints[_visualStrokePoints.Count - 1], hitPoint) > minVisualSpacing)
+                // Tích lũy điểm stroke
+                Vector3 p = hit.point;
+                if (_strokePoints.Count == 0 ||
+                    Vector3.Distance(_strokePoints[_strokePoints.Count - 1], p) > minVisualSpacing)
                 {
-                    _visualStrokePoints.Add(hitPoint);
+                    _strokePoints.Add(p);
                     _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, cutter.forward, 0.2f);
                 }
-
-                UpdateVisualLineRenderer();
             }
             else
             {
-                // Ray chạm vật khác → kết thúc stroke
                 if (_isRayOnCloth)
                 {
                     TryCommitCut(_currentRayTarget);
@@ -181,7 +122,6 @@ public class CuttingManager_UCloth : MonoBehaviour
         }
         else
         {
-            // Không chạm gì → kết thúc stroke
             if (_isRayOnCloth)
             {
                 TryCommitCut(_currentRayTarget);
@@ -196,42 +136,29 @@ public class CuttingManager_UCloth : MonoBehaviour
 
     private void TryCommitCut(GameObject target)
     {
-        if (target == null || _visualStrokePoints.Count < 2)
-        {
-            ClearStroke();
-            return;
-        }
+        if (target == null || _strokePoints.Count < 2) { _strokePoints.Clear(); return; }
 
         float totalLength = 0f;
-        for (int i = 1; i < _visualStrokePoints.Count; i++)
-            totalLength += Vector3.Distance(_visualStrokePoints[i - 1], _visualStrokePoints[i]);
+        for (int i = 1; i < _strokePoints.Count; i++)
+            totalLength += Vector3.Distance(_strokePoints[i - 1], _strokePoints[i]);
 
-        if (totalLength < minCutPathLength)
+        if (totalLength < minCutPathLength) { _strokePoints.Clear(); return; }
+
+        if (!_cutters.TryGetValue(target, out var mc) || mc == null) { _strokePoints.Clear(); return; }
+
+        List<Vector3> projected = ProjectStrokeOntoMesh(target, _strokePoints);
+
+        if (projected != null && projected.Count >= 2)
         {
-            ClearStroke();
-            return;
-        }
-
-        if (!_cutters.TryGetValue(target, out var mc) || mc == null)
-        {
-            ClearStroke();
-            return;
-        }
-
-        List<Vector3> projectedPath = ProjectStrokeOntoMesh(target, _visualStrokePoints);
-
-        if (projectedPath != null && projectedPath.Count >= 2)
-        {
-            // Precision error
             if (_isCollectingStudyData)
             {
-                int validCount = Mathf.Min(_visualStrokePoints.Count, projectedPath.Count);
-                for (int i = 0; i < validCount; i++)
-                    _precisionErrors.Add(Vector3.Distance(_visualStrokePoints[i], projectedPath[i]));
+                int n = Mathf.Min(_strokePoints.Count, projected.Count);
+                for (int i = 0; i < n; i++)
+                    _precisionErrors.Add(Vector3.Distance(_strokePoints[i], projected[i]));
             }
 
             mc.ClearPath();
-            foreach (var point in projectedPath) mc.ForceAddPathPoint(point);
+            foreach (var p in projected) mc.ForceAddPathPoint(p);
 
             var result = mc.CommitCut(splitOnlyWhenDisconnected);
             if (result == CutResult_Ucloth.Split)
@@ -244,105 +171,73 @@ public class CuttingManager_UCloth : MonoBehaviour
             }
         }
 
-        ClearStroke();
-    }
-
-    private void ClearStroke()
-    {
-        _visualStrokePoints.Clear();
-        if (_cutLine != null) _cutLine.enabled = false;
-    }
-
-    private void UpdateVisualLineRenderer()
-    {
-        if (_cutLine == null) return;
-        if (_visualStrokePoints.Count < 2) { _cutLine.enabled = false; return; }
-        _cutLine.enabled      = true;
-        _cutLine.positionCount = _visualStrokePoints.Count;
-        _cutLine.SetPositions(_visualStrokePoints.ToArray());
+        _strokePoints.Clear();
     }
 
     private List<Vector3> ProjectStrokeOntoMesh(GameObject target, List<Vector3> strokePoints)
     {
-        var intersectPoints = new List<Vector3>();
+        var result  = new List<Vector3>();
         var collider = target.GetComponent<Collider>();
         if (collider == null) return null;
 
         float backupDistance = 20f;
         float totalScanRange = 40f;
-
-        Vector3 projectDir = _averageStrokeForward.normalized;
+        Vector3 projectDir   = _averageStrokeForward.normalized;
         if (Camera.main != null) projectDir = Camera.main.transform.forward;
 
-        for (int i = 0; i < strokePoints.Count; i++)
+        foreach (var origin in strokePoints)
         {
-            Vector3 origin    = strokePoints[i];
-            Vector3 rayOrigin = origin - projectDir * backupDistance;
-            Ray projectionRay = new Ray(rayOrigin, projectDir);
+            Ray fwd = new Ray(origin - projectDir * backupDistance, projectDir);
+            if (collider.Raycast(fwd, out RaycastHit h, totalScanRange))
+            { result.Add(h.point); continue; }
 
-            if (collider.Raycast(projectionRay, out RaycastHit hitForward, totalScanRange))
-            {
-                intersectPoints.Add(hitForward.point);
-            }
-            else
-            {
-                Ray reverseRay = new Ray(origin + projectDir * backupDistance, -projectDir);
-                if (collider.Raycast(reverseRay, out RaycastHit hitReverse, totalScanRange))
-                    intersectPoints.Add(hitReverse.point);
-            }
+            Ray rev = new Ray(origin + projectDir * backupDistance, -projectDir);
+            if (collider.Raycast(rev, out RaycastHit h2, totalScanRange))
+                result.Add(h2.point);
         }
 
-        var filteredPoints = new List<Vector3>();
-        for (int i = 0; i < intersectPoints.Count; i++)
+        // Lọc điểm quá gần nhau
+        var filtered = new List<Vector3>();
+        foreach (var p in result)
         {
-            if (filteredPoints.Count == 0) filteredPoints.Add(intersectPoints[i]);
-            else if (Vector3.Distance(filteredPoints[filteredPoints.Count - 1], intersectPoints[i]) > minVisualSpacing * 0.4f)
-                filteredPoints.Add(intersectPoints[i]);
+            if (filtered.Count == 0 || Vector3.Distance(filtered[filtered.Count - 1], p) > minVisualSpacing * 0.4f)
+                filtered.Add(p);
         }
 
-        if (filteredPoints.Count >= 2)
+        // Extend hai đầu để đảm bảo cut xuyên qua biên
+        if (filtered.Count >= 2)
         {
-            Bounds targetBounds = collider.bounds;
-            float maxExtent     = Mathf.Max(targetBounds.size.x, targetBounds.size.y, targetBounds.size.z);
-            float adaptiveOffset = Mathf.Clamp(maxExtent * 0.2f, 0.01f, 0.3f);
-
-            Vector3 startDir = (filteredPoints[1] - filteredPoints[0]).normalized;
-            Vector3 endDir   = (filteredPoints[filteredPoints.Count - 1] - filteredPoints[filteredPoints.Count - 2]).normalized;
-
-            filteredPoints.Insert(0, filteredPoints[0] - startDir * adaptiveOffset);
-            filteredPoints.Add(filteredPoints[filteredPoints.Count - 1] + endDir * adaptiveOffset);
+            Bounds b      = collider.bounds;
+            float offset  = Mathf.Clamp(Mathf.Max(b.size.x, b.size.y, b.size.z) * 0.2f, 0.01f, 0.3f);
+            Vector3 sDir  = (filtered[1] - filtered[0]).normalized;
+            Vector3 eDir  = (filtered[filtered.Count - 1] - filtered[filtered.Count - 2]).normalized;
+            filtered.Insert(0, filtered[0] - sDir * offset);
+            filtered.Add(filtered[filtered.Count - 1] + eDir * offset);
         }
 
-        return filteredPoints;
+        return filtered;
     }
 
     private void ExportUserStudyData()
     {
-        float duration         = Time.time - _modeStartTime;
-        float avgFps           = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
+        float duration          = Time.time - _modeStartTime;
+        float avgFps            = _fpsAccumulatedTime > 0f ? _fpsFrameCount / _fpsAccumulatedTime : 0f;
         float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
 
-        int fileIndex = 1;
-        string fileName = "";
-        do
-        {
-            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_cut_{fileIndex:D3}.csv");
-            fileIndex++;
-        } while (File.Exists(fileName));
+        int idx = 1; string fileName;
+        do { fileName = Path.Combine(Application.persistentDataPath, $"userStudy_cut_{idx++:D3}.csv"); }
+        while (File.Exists(fileName));
 
         try
         {
-            using (StreamWriter sw = new StreamWriter(fileName))
+            using (var sw = new StreamWriter(fileName))
             {
                 sw.WriteLine("Experiment Name,Average FPS,Time (s),Cut Precision Error (m)");
                 sw.WriteLine($"cut,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
             }
             Debug.Log($"<color=green>[UserStudy]</color> Đã xuất: {fileName}");
         }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}");
-        }
+        catch (System.Exception e) { Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}"); }
     }
 
     public void RegisterAllClothObjects()
@@ -355,10 +250,10 @@ public class CuttingManager_UCloth : MonoBehaviour
         if (obj == null || _cutters.ContainsKey(obj)) return;
         if (obj.GetComponent<MeshFilter>() == null) return;
 
-        var instantCutter = new MeshCutter_UCloth(obj, splitForce);
-        instantCutter._minPathPointSpacingOverride = minVisualSpacing;
-        instantCutter.Initialize();
-        _cutters[obj] = instantCutter;
+        var mc = new MeshCutter_UCloth(obj, splitForce);
+        mc._minPathPointSpacingOverride = minVisualSpacing;
+        mc.Initialize();
+        _cutters[obj] = mc;
 
         if (obj.GetComponent<UCloth.UCCloth>() != null)
         {
@@ -387,7 +282,6 @@ public class CuttingManager_UCloth : MonoBehaviour
         var ucCloth = obj.GetComponent<UCloth.UCCloth>();
         if (ucCloth == null) yield break;
         float timeout = 1.5f;
-
         while (timeout > 0f)
         {
             if (obj == null) yield break;
@@ -400,7 +294,6 @@ public class CuttingManager_UCloth : MonoBehaviour
             timeout -= Time.deltaTime;
             yield return null;
         }
-
         if (obj == null || !_cutters.ContainsKey(obj)) yield break;
         _cutters[obj].Initialize();
     }
@@ -422,21 +315,5 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (obj == null || _cutters.ContainsKey(obj)) continue;
             RegisterClothObject(obj);
         }
-    }
-
-    private void OnGUI()
-    {
-        if (string.IsNullOrEmpty(_uiDisplayMessage)) return;
-
-        GUIStyle style = new GUIStyle();
-        style.alignment = TextAnchor.MiddleCenter;
-        style.fontSize  = 28;
-
-        style.normal.textColor = Color.black;
-        GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 152, 600, 50), _uiDisplayMessage, style);
-        GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 148, 600, 50), _uiDisplayMessage, style);
-
-        style.normal.textColor = Color.red;
-        GUI.Label(new Rect(Screen.width / 2 - 300, Screen.height - 150, 600, 50), _uiDisplayMessage, style);
     }
 }
