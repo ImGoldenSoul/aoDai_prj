@@ -1,5 +1,5 @@
 // ============================================================
-//  SewingManager_UCloth.cs  — v11.0 (User Study Integrated)
+//  SewingManager_UCloth.cs  — v12.0 (Raycast-Only, UserStudy B/C)
 // ============================================================
 
 using System.Collections.Generic;
@@ -7,9 +7,6 @@ using System.IO;
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
 using System.Linq;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem;
-#endif
 
 public class SewingManager_UCloth : MonoBehaviour
 {
@@ -22,31 +19,16 @@ public class SewingManager_UCloth : MonoBehaviour
     public bool  showDebugRay = true;
 
     [Header("Sewing Settings")]
-    public string clothTag     = "Cloth";
-    public float weldThreshold = 0.008f;
-    public float sewRadius     = 0.04f;
-    public int   edgesPerFrame = 5;
+    public string clothTag        = "Cloth";
+    public float weldThreshold   = 0.008f;
+    public float sewRadius        = 0.04f;
+    public int   edgesPerFrame    = 5;
     public float minVisualSpacing = 0.01f;
 
-    [Header("Strict Multi-Button Mapping")]
-    public KeyCode startSewModeKey  = KeyCode.Space;
-    public KeyCode drawStrokeKey    = KeyCode.Mouse0;
-    public KeyCode cancelSewModeKey = KeyCode.Escape;
-
-#if ENABLE_INPUT_SYSTEM
-    [Header("New Input System Actions (Supports Both Controllers)")]
-    public InputActionReference leftStartModeAction;
-    public InputActionReference rightStartModeAction;
-    
-    public InputActionReference leftDrawStrokeAction;
-    public InputActionReference rightDrawStrokeAction;
-    
-    public InputActionReference leftCancelModeAction;
-    public InputActionReference rightCancelModeAction;
-#endif
-
-    private enum SewingState { Idle, SewingModeActive }
-    private SewingState _currentState = SewingState.Idle;
+    // ── User Study Keys ──
+    [Header("User Study")]
+    public KeyCode userStudyStartKey = KeyCode.B;
+    public KeyCode userStudyEndKey   = KeyCode.C;
 
     private MeshSewer_UCloth _sewerSession;
     private GameObject _targetObjA;
@@ -54,13 +36,15 @@ public class SewingManager_UCloth : MonoBehaviour
 
     private readonly List<Vector3> _currentStrokePoints = new List<Vector3>();
     private Vector3 _averageStrokeForward = Vector3.forward;
-    private bool _isDrawingActive = false;
+
+    // ── Ray-based continuous sew tracking ──
+    private bool _isRayOnCloth = false;
 
     private string _uiDisplayMessage = "";
     private float _uiMessageTimer = 0f;
-    private XRGrabInteractable _sewerGrab;
 
     // ── DATA METRICS FOR USER STUDY ──
+    private bool _isCollectingStudyData = false;
     private float _modeStartTime;
     private int _fpsFrameCount;
     private float _fpsAccumulatedTime;
@@ -72,42 +56,39 @@ public class SewingManager_UCloth : MonoBehaviour
         foreach (var obj in clothObjects)
             RegisterClothObject(obj);
 
-        if (sewer != null)
-        {
-            _sewerGrab = sewer.GetComponent<XRGrabInteractable>();
-            if (_sewerGrab == null)
-                Debug.LogWarning("[SewingManager] Không tìm thấy XRGrabInteractable trên sewer — text trạng thái sew mode sẽ không hiển thị.");
-        }
+        if (sewer == null)
+            Debug.LogWarning("[SewingManager] Chưa gán sewer GameObject.");
 
         Debug.Log("<color=cyan>[SewingManager]</color> Hệ thống sẵn sàng.");
-    }
-
-    private bool IsToolGrabbed()
-    {
-        return _sewerGrab != null && _sewerGrab.isSelected;
-    }
-
-    private void SetLocomotionEnabled(bool enabledState)
-    {
-        var providers = FindObjectsOfType<MonoBehaviour>();
-        foreach (var provider in providers)
-        {
-            string typeName = provider.GetType().Name;
-            if (typeName.Contains("MoveProvider") || typeName.Contains("TurnProvider") || 
-                typeName.Contains("TeleportationProvider") || typeName.Contains("LocomotionSystem"))
-            {
-                provider.enabled = enabledState;
-            }
-        }
     }
 
     void LateUpdate()
     {
         if (sewer == null) return;
 
-        bool wantsToStart  = IsStartPressedThisFrame();
-        bool wantsToCancel = IsCancelPressedThisFrame();
-        bool isDrawHeld    = IsDrawHeldNow();
+        // ── User Study toggle ──
+        if (Input.GetKeyDown(userStudyStartKey) && !_isCollectingStudyData)
+        {
+            _isCollectingStudyData  = true;
+            _modeStartTime          = Time.time;
+            _fpsFrameCount          = 0;
+            _fpsAccumulatedTime     = 0f;
+            _precisionErrors.Clear();
+            Debug.Log("<color=yellow>[UserStudy-Sew]</color> Bắt đầu thu thập dữ liệu.");
+        }
+
+        if (Input.GetKeyDown(userStudyEndKey) && _isCollectingStudyData)
+        {
+            ExportUserStudyData();
+            _isCollectingStudyData = false;
+            Debug.Log("<color=green>[UserStudy-Sew]</color> Kết thúc thu thập dữ liệu.");
+        }
+
+        if (_isCollectingStudyData)
+        {
+            _fpsFrameCount++;
+            _fpsAccumulatedTime += Time.unscaledDeltaTime;
+        }
 
         if (_uiMessageTimer > 0f)
         {
@@ -115,72 +96,54 @@ public class SewingManager_UCloth : MonoBehaviour
             if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
         }
 
-        switch (_currentState)
+        // ── Raycast từ sewer liên tục ──
+        Ray ray = new Ray(sewer.transform.position, sewer.transform.forward);
+        if (showDebugRay) Debug.DrawRay(sewer.transform.position, sewer.transform.forward * rayLength, Color.cyan);
+
+        bool hitCloth = false;
+        if (Physics.Raycast(ray, out RaycastHit hit, rayLength))
         {
-            case SewingState.Idle:
-                if (wantsToStart)
+            GameObject hitObj = hit.collider.gameObject;
+            if (hitObj.CompareTag(clothTag) && hitObj.GetComponent<UCloth.UCCloth>() != null)
+            {
+                hitCloth = true;
+
+                // Khởi tạo session nếu chưa có
+                if (!_isRayOnCloth || _sewerSession == null)
                 {
-                    if (TryInitializeSewingSession())
-                    {
-                        _currentState = SewingState.SewingModeActive;
-                        _currentStrokePoints.Clear();
-                        _isDrawingActive = false;
-                        
-                        // Khởi động các bộ đếm User Study
-                        _modeStartTime = Time.time;
-                        _fpsFrameCount = 0;
-                        _fpsAccumulatedTime = 0f;
-                        _precisionErrors.Clear();
-
-                        // Khóa góc nhìn, tránh lỗi dịch chuyển Viewport ngoài ý muốn
-                        SetLocomotionEnabled(false);
-
-                        if (IsToolGrabbed())
-                        {
-                            _uiDisplayMessage = "You are in sewing mode, press B/Y on the controller to end sewing mode";
-                            _uiMessageTimer = float.MaxValue; 
-                        }
-                    }
-                }
-                break;
-
-            case SewingState.SewingModeActive:
-                // Theo dõi dữ liệu FPS trong suốt quá trình xử lý khâu
-                _fpsFrameCount++;
-                _fpsAccumulatedTime += Time.unscaledDeltaTime;
-
-                if (wantsToCancel)
-                {
-                    ExportUserStudyData();
-                    FinalizeSewingSession();
-                    _currentState = SewingState.Idle;
-                    SetLocomotionEnabled(true);
-                    
-                    _uiDisplayMessage = "End sew mode, your mesh is sewn.";
-                    _uiMessageTimer = 4.0f;
-                    break;
+                    _isRayOnCloth = true;
+                    if (_sewerSession == null)
+                        TryInitializeSewingSession(hit.point);
                 }
 
-                if (isDrawHeld)
+                // Thêm điểm stroke
+                Vector3 hitPoint = hit.point;
+                if (_currentStrokePoints.Count == 0 ||
+                    Vector3.Distance(_currentStrokePoints[_currentStrokePoints.Count - 1], hitPoint) > minVisualSpacing)
                 {
-                    if (!_isDrawingActive) _isDrawingActive = true;
-                    HandleStrokeDrawing();
+                    _currentStrokePoints.Add(hitPoint);
+                    _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, sewer.transform.forward, 0.1f);
+                    InjectPointToLiveMerge(hitPoint);
                 }
-                else
-                {
-                    if (_isDrawingActive) _isDrawingActive = false;
-                }
-
-                if (_sewerSession != null)
-                {
-                    _sewerSession.Sew();
-                }
-                break;
+            }
         }
+
+        if (!hitCloth && _isRayOnCloth)
+        {
+            // Ray rời khỏi cloth → commit sew
+            _isRayOnCloth = false;
+            FinalizeSewingSession();
+        }
+
+        if (_sewerSession != null)
+            _sewerSession.Sew();
     }
 
-    private bool TryInitializeSewingSession()
+    private bool TryInitializeSewingSession(Vector3 startPoint)
     {
+        _currentStrokePoints.Clear();
+        _averageStrokeForward = sewer.transform.forward;
+
         HashSet<GameObject> targetClothes = FindClothesNearSewer();
         if (targetClothes.Count == 0) return false;
 
@@ -197,47 +160,33 @@ public class SewingManager_UCloth : MonoBehaviour
         _sewerSession = new MeshSewer_UCloth(_targetObjA, _targetObjB, weldThreshold, edgesPerFrame);
         _sewerSession.OnSeamCompleted = RegisterSewnMesh;
 
-        Ray initialRay = new Ray(sewer.transform.position, sewer.transform.forward);
-        Vector3 initialHit = sewer.transform.position;
-        if (Physics.Raycast(initialRay, out RaycastHit hit, rayLength)) initialHit = hit.point;
+        bool initSuccess = _sewerSession.Initialize(startPoint, startPoint, sewRadius);
 
-        bool initSuccess = _sewerSession.Initialize(initialHit, initialHit, sewRadius);
-        
         if (!initSuccess)
         {
-            Debug.LogWarning("[SewingManager] Không thể khởi tạo MeshSewer (có thể do điểm bắt đầu quá xa mép vải).");
+            Debug.LogWarning("[SewingManager] Không thể khởi tạo MeshSewer.");
             _sewerSession = null;
             _targetObjA = _targetObjB = null;
         }
-        
-        return initSuccess;
-    }
 
-    private void HandleStrokeDrawing()
-    {
-        Vector3 currentPos = sewer.transform.position;
-        if (_currentStrokePoints.Count == 0 || Vector3.Distance(_currentStrokePoints[_currentStrokePoints.Count - 1], currentPos) > minVisualSpacing)
-        {
-            _currentStrokePoints.Add(currentPos);
-            _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, sewer.transform.forward, 0.1f);
-            InjectPointToLiveMerge(currentPos);
-        }
+        return initSuccess;
     }
 
     private void InjectPointToLiveMerge(Vector3 rawPoint)
     {
         if (_sewerSession == null) return;
 
-        List<Vector3> singlePointList = new List<Vector3> { rawPoint };
-        List<Vector3> projA = ProjectStrokeOntoMesh(_targetObjA, singlePointList);
-        List<Vector3> projB = ProjectStrokeOntoMesh(_targetObjB, singlePointList);
+        List<Vector3> singlePoint = new List<Vector3> { rawPoint };
+        List<Vector3> projA = ProjectStrokeOntoMesh(_targetObjA, singlePoint);
+        List<Vector3> projB = ProjectStrokeOntoMesh(_targetObjB, singlePoint);
 
         if (projA != null && projA.Count > 0 && projB != null && projB.Count > 0)
         {
-            // Tính khoảng cách sai lệch Precision giữa kim/controller và trung điểm đường chỉ trên vải
-            Vector3 midSeamPoint = (projA[0] + projB[0]) * 0.5f;
-            float errorDist = Vector3.Distance(rawPoint, midSeamPoint);
-            _precisionErrors.Add(errorDist);
+            if (_isCollectingStudyData)
+            {
+                Vector3 midSeamPoint = (projA[0] + projB[0]) * 0.5f;
+                _precisionErrors.Add(Vector3.Distance(rawPoint, midSeamPoint));
+            }
 
             _sewerSession.AddSeam(projA[0], projB[0], sewRadius);
             _sewerSession.UpdateLiveVisuals();
@@ -249,44 +198,14 @@ public class SewingManager_UCloth : MonoBehaviour
         if (_sewerSession == null) return;
 
         _currentStrokePoints.Clear();
-        _isDrawingActive = false;
 
         while (!_sewerSession.Sew()) { }
 
         string newMeshName = $"{_targetObjA.name}_InteractiveMergedCloth";
         _sewerSession.Finalize(newMeshName);
 
-        _sewerSession = null;
+        _sewerSession   = null;
         _targetObjA = _targetObjB = null;
-    }
-
-    private void ExportUserStudyData()
-    {
-        float duration = Time.time - _modeStartTime;
-        float avgFps = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
-        float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
-
-        int fileIndex = 1;
-        string fileName = "";
-        do
-        {
-            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_sew_{fileIndex:D3}.csv");
-            fileIndex++;
-        } while (File.Exists(fileName));
-
-        try
-        {
-            using (StreamWriter sw = new StreamWriter(fileName))
-            {
-                sw.WriteLine("Experiment Name,Average FPS,Time (s),Sew Precision Error (m)");
-                sw.WriteLine($"sew,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
-            }
-            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm thành công: {fileName}");
-        }
-        catch (System.Exception e)
-        {
-            Debug.LogError($"[UserStudy] Lỗi xuất CSV file: {e.Message}");
-        }
     }
 
     private HashSet<GameObject> FindClothesNearSewer()
@@ -295,10 +214,8 @@ public class SewingManager_UCloth : MonoBehaviour
         for (int i = -3; i <= 3; i++)
         {
             Vector3 dir = Quaternion.Euler(0, i * 4f, 0) * sewer.transform.forward;
-            Ray ray = new Ray(sewer.transform.position, dir);
-            var hits = Physics.RaycastAll(ray, rayLength);
-
-            foreach (var h in hits)
+            Ray r = new Ray(sewer.transform.position, dir);
+            foreach (var h in Physics.RaycastAll(r, rayLength))
             {
                 var go = h.collider.gameObject;
                 if (go.CompareTag(clothTag) && go.GetComponent<UCloth.UCCloth>() != null)
@@ -317,52 +234,49 @@ public class SewingManager_UCloth : MonoBehaviour
         var collider = target.GetComponent<Collider>();
         if (collider == null) return null;
 
-        float backupDistance = 10f; 
+        float backupDistance = 10f;
         float totalScanRange = 20f;
-        Vector3 projectDir = _averageStrokeForward.normalized;
+        Vector3 projectDir   = _averageStrokeForward.normalized;
 
         for (int i = 0; i < strokePoints.Count; i++)
         {
-            Vector3 origin = strokePoints[i];
+            Vector3 origin    = strokePoints[i];
             Vector3 rayOrigin = origin - projectDir * backupDistance;
             Ray projectionRay = new Ray(rayOrigin, projectDir);
 
             if (collider.Raycast(projectionRay, out RaycastHit hitForward, totalScanRange))
-            {
                 intersectPoints.Add(hitForward.point);
-            }
         }
         return intersectPoints;
     }
 
-    private bool IsStartPressedThisFrame()
+    private void ExportUserStudyData()
     {
-        bool pressed = Input.GetKeyDown(startSewModeKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftStartModeAction?.action != null) pressed |= leftStartModeAction.action.WasPressedThisFrame();
-        if (rightStartModeAction?.action != null) pressed |= rightStartModeAction.action.WasPressedThisFrame();
-#endif
-        return pressed;
-    }
+        float duration          = Time.time - _modeStartTime;
+        float avgFps            = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
+        float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
 
-    private bool IsDrawHeldNow()
-    {
-        bool held = Input.GetKey(drawStrokeKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftDrawStrokeAction?.action != null) held |= leftDrawStrokeAction.action.IsPressed();
-        if (rightDrawStrokeAction?.action != null) held |= rightDrawStrokeAction.action.IsPressed();
-#endif
-        return held;
-    }
+        int fileIndex = 1;
+        string fileName = "";
+        do
+        {
+            fileName = Path.Combine(Application.persistentDataPath, $"userStudy_sew_{fileIndex:D3}.csv");
+            fileIndex++;
+        } while (File.Exists(fileName));
 
-    private bool IsCancelPressedThisFrame()
-    {
-        bool pressed = Input.GetKeyDown(cancelSewModeKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftCancelModeAction?.action != null) pressed |= leftCancelModeAction.action.WasPressedThisFrame();
-        if (rightCancelModeAction?.action != null) pressed |= rightCancelModeAction.action.WasPressedThisFrame();
-#endif
-        return pressed;
+        try
+        {
+            using (StreamWriter sw = new StreamWriter(fileName))
+            {
+                sw.WriteLine("Experiment Name,Average FPS,Time (s),Sew Precision Error (m)");
+                sw.WriteLine($"sew,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
+            }
+            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất: {fileName}");
+        }
+        catch (System.Exception e)
+        {
+            Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}");
+        }
     }
 
     public void RegisterClothObject(GameObject obj)
@@ -385,13 +299,12 @@ public class SewingManager_UCloth : MonoBehaviour
 
         GUIStyle style = new GUIStyle();
         style.alignment = TextAnchor.MiddleCenter;
-        style.fontSize = 28;
-        style.normal.textColor = Color.white;
+        style.fontSize  = 28;
 
         style.normal.textColor = Color.black;
         GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 102, 600, 50), _uiDisplayMessage, style);
         GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 98, 600, 50), _uiDisplayMessage, style);
-        
+
         style.normal.textColor = Color.cyan;
         GUI.Label(new Rect(Screen.width / 2 - 300, Screen.height - 100, 600, 50), _uiDisplayMessage, style);
     }

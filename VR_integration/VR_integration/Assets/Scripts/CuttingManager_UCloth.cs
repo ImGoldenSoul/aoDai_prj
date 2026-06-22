@@ -1,5 +1,5 @@
 // ============================================================
-//  CuttingManager_UCloth.cs  — v14.0 (User Study Integrated)
+//  CuttingManager_UCloth.cs  — v15.0 (Raycast-Only, UserStudy B/C)
 // ============================================================
 
 using System.Collections;
@@ -8,9 +8,6 @@ using System.IO;
 using UnityEngine;
 using UnityEngine.XR.Interaction.Toolkit;
 using System.Linq;
-#if ENABLE_INPUT_SYSTEM
-using UnityEngine.InputSystem;
-#endif
 
 public class CuttingManager_UCloth : MonoBehaviour
 {
@@ -28,27 +25,15 @@ public class CuttingManager_UCloth : MonoBehaviour
     public float minVisualSpacing = 0.01f;
     public float minCutPathLength = 0.04f;
 
-    [Header("Strict Multi-Trigger Mapping")]
-    public KeyCode cutTriggerKey = KeyCode.Mouse0;
-    public KeyCode cutCancelKey  = KeyCode.Escape;
-    public KeyCode drawStrokeKey = KeyCode.Mouse1;
-
-#if ENABLE_INPUT_SYSTEM
-    [Header("New Input System Actions (Supports Both Controllers)")]
-    public InputActionReference leftCutTriggerAction;
-    public InputActionReference rightCutTriggerAction;
-    
-    public InputActionReference leftCancelCutAction;
-    public InputActionReference rightCancelCutAction;
-
-    public InputActionReference leftDrawStrokeAction;
-    public InputActionReference rightDrawStrokeAction;
-#endif
-
     [Header("Cut Line Visual")]
     public Material cutLineMaterial;
     public float cutLineWidth = 0.004f;
     public Color cutLineColor = new Color(1f, 0.15f, 0.05f, 1f);
+
+    // ── User Study Keys ──
+    [Header("User Study")]
+    public KeyCode userStudyStartKey = KeyCode.B;
+    public KeyCode userStudyEndKey   = KeyCode.C;
 
     private LineRenderer _cutLine;
     private readonly List<Vector3> _visualStrokePoints = new List<Vector3>();
@@ -60,12 +45,15 @@ public class CuttingManager_UCloth : MonoBehaviour
     private float _rescanTimer;
     public float rescanInterval = 1f;
 
-    private XRGrabInteractable _cutterGrab;
     private string _uiDisplayMessage = "";
     private float _uiMessageTimer = 0f;
-    private bool _isInCutMode = false;
+
+    // ── Ray-based continuous cut tracking ──
+    private GameObject _currentRayTarget = null;   // cloth object đang bị ray chiếu vào
+    private bool _isRayOnCloth = false;
 
     // ── DATA METRICS FOR USER STUDY ──
+    private bool _isCollectingStudyData = false;
     private float _modeStartTime;
     private int _fpsFrameCount;
     private float _fpsAccumulatedTime;
@@ -80,7 +68,6 @@ public class CuttingManager_UCloth : MonoBehaviour
             return;
         }
 
-        _cutterGrab = cutter.GetComponent<XRGrabInteractable>();
         RegisterAllClothObjects();
         SetupCutLineVisual();
     }
@@ -111,38 +98,37 @@ public class CuttingManager_UCloth : MonoBehaviour
             _cutLine.material = cutLineMaterial;
         }
         _cutLine.startColor = cutLineColor;
-        _cutLine.endColor = cutLineColor;
-        _cutLine.enabled = false;
-    }
-
-    private bool IsToolGrabbed()
-    {
-        return _cutterGrab != null && _cutterGrab.isSelected;
-    }
-
-    /// <summary>Khóa/mở khóa các component di chuyển của VR để tránh Viewport bị dịch chuyển khi bấm nút</summary>
-    private void SetLocomotionEnabled(bool enabledState)
-    {
-        var providers = FindObjectsOfType<MonoBehaviour>();
-        foreach (var provider in providers)
-        {
-            string typeName = provider.GetType().Name;
-            if (typeName.Contains("MoveProvider") || typeName.Contains("TurnProvider") || 
-                typeName.Contains("TeleportationProvider") || typeName.Contains("LocomotionSystem"))
-            {
-                provider.enabled = enabledState;
-            }
-        }
+        _cutLine.endColor   = cutLineColor;
+        _cutLine.enabled    = false;
     }
 
     void LateUpdate()
     {
         if (cutter == null) return;
 
-        bool triggerPressedThisFrame = IsTriggerPressedThisFrame();
-        bool cancelPressed = IsCancelPressedThisFrame();
-        bool drawHeldNow = IsDrawHeldNow();
-        bool drawReleasedThisFrame = IsDrawReleasedThisFrame();
+        // ── User Study toggle ──
+        if (Input.GetKeyDown(userStudyStartKey) && !_isCollectingStudyData)
+        {
+            _isCollectingStudyData = true;
+            _modeStartTime         = Time.time;
+            _fpsFrameCount         = 0;
+            _fpsAccumulatedTime    = 0f;
+            _precisionErrors.Clear();
+            Debug.Log("<color=yellow>[UserStudy-Cut]</color> Bắt đầu thu thập dữ liệu.");
+        }
+
+        if (Input.GetKeyDown(userStudyEndKey) && _isCollectingStudyData)
+        {
+            ExportUserStudyData();
+            _isCollectingStudyData = false;
+            Debug.Log("<color=green>[UserStudy-Cut]</color> Kết thúc thu thập dữ liệu.");
+        }
+
+        if (_isCollectingStudyData)
+        {
+            _fpsFrameCount++;
+            _fpsAccumulatedTime += Time.unscaledDeltaTime;
+        }
 
         if (_uiMessageTimer > 0f)
         {
@@ -150,106 +136,71 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (_uiMessageTimer <= 0f) _uiDisplayMessage = "";
         }
 
-        if (triggerPressedThisFrame)
+        // ── Raycast từ cutter liên tục ──
+        Ray ray = new Ray(cutter.position, cutter.forward);
+        if (showDebugRay) Debug.DrawRay(cutter.position, cutter.forward * rayLength, Color.red);
+
+        if (Physics.Raycast(ray, out RaycastHit hit, rayLength))
         {
-            if (!_isInCutMode)
+            GameObject hitObj = hit.collider.gameObject;
+
+            if (hitObj.CompareTag(clothTag) && _cutters.ContainsKey(hitObj))
             {
-                if (IsToolGrabbed())
+                // Nếu bắt đầu chạm cloth mới → reset stroke
+                if (!_isRayOnCloth || _currentRayTarget != hitObj)
                 {
-                    ClearStroke();
+                    if (_isRayOnCloth && _currentRayTarget != hitObj)
+                        TryCommitCut(_currentRayTarget);
+
+                    _isRayOnCloth      = true;
+                    _currentRayTarget  = hitObj;
                     _averageStrokeForward = cutter.forward;
-                    _isInCutMode = true;
-
-                    // Bắt đầu đo metric user study
-                    _modeStartTime = Time.time;
-                    _fpsFrameCount = 0;
-                    _fpsAccumulatedTime = 0f;
-                    _precisionErrors.Clear();
-
-                    // Khóa di chuyển hệ thống để giữ nguyên Viewport hiện tại
-                    SetLocomotionEnabled(false);
                 }
-            }
-            else
-            {
-                ExportUserStudyData();
-                ClearStroke();
-                _isInCutMode = false;
-                SetLocomotionEnabled(true);
-                _uiDisplayMessage = "";
-                _uiMessageTimer = 0f;
-            }
-        }
 
-        if (_isInCutMode)
-        {
-            // Tính toán FPS liên tục trong chế độ
-            _fpsFrameCount++;
-            _fpsAccumulatedTime += Time.unscaledDeltaTime;
-
-            if (IsToolGrabbed() && drawHeldNow)
-            {
-                Vector3 currentPos = cutter.position;
-                if (_visualStrokePoints.Count == 0 || Vector3.Distance(_visualStrokePoints[_visualStrokePoints.Count - 1], currentPos) > minVisualSpacing)
+                // Thêm điểm vào stroke
+                Vector3 hitPoint = hit.point;
+                if (_visualStrokePoints.Count == 0 ||
+                    Vector3.Distance(_visualStrokePoints[_visualStrokePoints.Count - 1], hitPoint) > minVisualSpacing)
                 {
-                    _visualStrokePoints.Add(currentPos);
+                    _visualStrokePoints.Add(hitPoint);
                     _averageStrokeForward = Vector3.Lerp(_averageStrokeForward, cutter.forward, 0.2f);
                 }
 
                 UpdateVisualLineRenderer();
             }
-
-            if (drawReleasedThisFrame && IsToolGrabbed())
+            else
             {
-                ProcessStrokeCut();
-            }
-
-            if (IsToolGrabbed())
-            {
-                _uiDisplayMessage = drawHeldNow
-                    ? "you are drawing the cut line"
-                    : "you are in the cutting mode, hold draw button to trace the cut line";
-                _uiMessageTimer = 0.1f;
+                // Ray chạm vật khác → kết thúc stroke
+                if (_isRayOnCloth)
+                {
+                    TryCommitCut(_currentRayTarget);
+                    _isRayOnCloth     = false;
+                    _currentRayTarget = null;
+                }
             }
         }
-
-        if (cancelPressed && _isInCutMode)
+        else
         {
-            ExportUserStudyData();
-            ClearStroke();
-            _isInCutMode = false;
-            SetLocomotionEnabled(true);
-            
-            _uiDisplayMessage = "End cutting mode.";
-            _uiMessageTimer = 3f;
+            // Không chạm gì → kết thúc stroke
+            if (_isRayOnCloth)
+            {
+                TryCommitCut(_currentRayTarget);
+                _isRayOnCloth     = false;
+                _currentRayTarget = null;
+            }
         }
 
         CleanupStaleObjects();
         RescanForNewClothObjects();
     }
 
-    private void ClearStroke()
+    private void TryCommitCut(GameObject target)
     {
-        _visualStrokePoints.Clear();
-        if (_cutLine != null) _cutLine.enabled = false;
-    }
-
-    private void UpdateVisualLineRenderer()
-    {
-        if (_cutLine == null) return;
-        if (_visualStrokePoints.Count < 2)
+        if (target == null || _visualStrokePoints.Count < 2)
         {
-            _cutLine.enabled = false;
+            ClearStroke();
             return;
         }
-        _cutLine.enabled = true;
-        _cutLine.positionCount = _visualStrokePoints.Count;
-        _cutLine.SetPositions(_visualStrokePoints.ToArray());
-    }
-
-    private void ProcessStrokeCut()
-    {
-        if (_visualStrokePoints.Count < 2) return;
 
         float totalLength = 0f;
         for (int i = 1; i < _visualStrokePoints.Count; i++)
@@ -261,44 +212,54 @@ public class CuttingManager_UCloth : MonoBehaviour
             return;
         }
 
-        var targetsToCheck = new List<GameObject>(_cutters.Keys);
-
-        foreach (var target in targetsToCheck)
+        if (!_cutters.TryGetValue(target, out var mc) || mc == null)
         {
-            if (target == null || !target.activeInHierarchy) continue;
-            if (!_cutters.TryGetValue(target, out var mc) || mc == null) continue;
+            ClearStroke();
+            return;
+        }
 
-            List<Vector3> dynamicMeshIntersectionPath = ProjectStrokeOntoMesh(target, _visualStrokePoints);
+        List<Vector3> projectedPath = ProjectStrokeOntoMesh(target, _visualStrokePoints);
 
-            if (dynamicMeshIntersectionPath != null && dynamicMeshIntersectionPath.Count >= 2)
+        if (projectedPath != null && projectedPath.Count >= 2)
+        {
+            // Precision error
+            if (_isCollectingStudyData)
             {
-                // Tính toán Precision Error (khoảng cách sai lệch giữa tay và điểm chạm vật lý tương ứng)
-                int validCount = Mathf.Min(_visualStrokePoints.Count, dynamicMeshIntersectionPath.Count);
+                int validCount = Mathf.Min(_visualStrokePoints.Count, projectedPath.Count);
                 for (int i = 0; i < validCount; i++)
-                {
-                    float dist = Vector3.Distance(_visualStrokePoints[i], dynamicMeshIntersectionPath[i]);
-                    _precisionErrors.Add(dist);
-                }
+                    _precisionErrors.Add(Vector3.Distance(_visualStrokePoints[i], projectedPath[i]));
+            }
 
-                mc.ClearPath();
-                foreach (var point in dynamicMeshIntersectionPath) mc.ForceAddPathPoint(point);
+            mc.ClearPath();
+            foreach (var point in projectedPath) mc.ForceAddPathPoint(point);
 
-                var result = mc.CommitCut(splitOnlyWhenDisconnected);
-                if (result == CutResult_Ucloth.Split)
-                {
-                    var newPieces = mc.GetLastCreatedPieces();
-                    target.SetActive(false);
-                    _cutters.Remove(target);
-                    _ucClothObjects.Remove(target);
-
-                    foreach (var piece in newPieces) RegisterClothObject(piece);
-                    break;
-                }
+            var result = mc.CommitCut(splitOnlyWhenDisconnected);
+            if (result == CutResult_Ucloth.Split)
+            {
+                var newPieces = mc.GetLastCreatedPieces();
+                target.SetActive(false);
+                _cutters.Remove(target);
+                _ucClothObjects.Remove(target);
+                foreach (var piece in newPieces) RegisterClothObject(piece);
             }
         }
 
+        ClearStroke();
+    }
+
+    private void ClearStroke()
+    {
         _visualStrokePoints.Clear();
         if (_cutLine != null) _cutLine.enabled = false;
+    }
+
+    private void UpdateVisualLineRenderer()
+    {
+        if (_cutLine == null) return;
+        if (_visualStrokePoints.Count < 2) { _cutLine.enabled = false; return; }
+        _cutLine.enabled      = true;
+        _cutLine.positionCount = _visualStrokePoints.Count;
+        _cutLine.SetPositions(_visualStrokePoints.ToArray());
     }
 
     private List<Vector3> ProjectStrokeOntoMesh(GameObject target, List<Vector3> strokePoints)
@@ -307,7 +268,7 @@ public class CuttingManager_UCloth : MonoBehaviour
         var collider = target.GetComponent<Collider>();
         if (collider == null) return null;
 
-        float backupDistance = 20f; 
+        float backupDistance = 20f;
         float totalScanRange = 40f;
 
         Vector3 projectDir = _averageStrokeForward.normalized;
@@ -315,7 +276,7 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         for (int i = 0; i < strokePoints.Count; i++)
         {
-            Vector3 origin = strokePoints[i];
+            Vector3 origin    = strokePoints[i];
             Vector3 rayOrigin = origin - projectDir * backupDistance;
             Ray projectionRay = new Ray(rayOrigin, projectDir);
 
@@ -327,9 +288,7 @@ public class CuttingManager_UCloth : MonoBehaviour
             {
                 Ray reverseRay = new Ray(origin + projectDir * backupDistance, -projectDir);
                 if (collider.Raycast(reverseRay, out RaycastHit hitReverse, totalScanRange))
-                {
                     intersectPoints.Add(hitReverse.point);
-                }
             }
         }
 
@@ -337,27 +296,21 @@ public class CuttingManager_UCloth : MonoBehaviour
         for (int i = 0; i < intersectPoints.Count; i++)
         {
             if (filteredPoints.Count == 0) filteredPoints.Add(intersectPoints[i]);
-            else
-            {
-                if (Vector3.Distance(filteredPoints[filteredPoints.Count - 1], intersectPoints[i]) > minVisualSpacing * 0.4f)
-                    filteredPoints.Add(intersectPoints[i]);
-            }
+            else if (Vector3.Distance(filteredPoints[filteredPoints.Count - 1], intersectPoints[i]) > minVisualSpacing * 0.4f)
+                filteredPoints.Add(intersectPoints[i]);
         }
 
         if (filteredPoints.Count >= 2)
         {
             Bounds targetBounds = collider.bounds;
-            float maxExttent = Mathf.Max(targetBounds.size.x, targetBounds.size.y, targetBounds.size.z);
-            float adaptiveOffset = Mathf.Clamp(maxExttent * 0.2f, 0.01f, 0.3f);
+            float maxExtent     = Mathf.Max(targetBounds.size.x, targetBounds.size.y, targetBounds.size.z);
+            float adaptiveOffset = Mathf.Clamp(maxExtent * 0.2f, 0.01f, 0.3f);
 
             Vector3 startDir = (filteredPoints[1] - filteredPoints[0]).normalized;
-            Vector3 endDir = (filteredPoints[filteredPoints.Count - 1] - filteredPoints[filteredPoints.Count - 2]).normalized;
+            Vector3 endDir   = (filteredPoints[filteredPoints.Count - 1] - filteredPoints[filteredPoints.Count - 2]).normalized;
 
-            Vector3 startExt = filteredPoints[0] - startDir * adaptiveOffset;
-            Vector3 endExt = filteredPoints[filteredPoints.Count - 1] + endDir * adaptiveOffset;
-            
-            filteredPoints.Insert(0, startExt);
-            filteredPoints.Add(endExt);
+            filteredPoints.Insert(0, filteredPoints[0] - startDir * adaptiveOffset);
+            filteredPoints.Add(filteredPoints[filteredPoints.Count - 1] + endDir * adaptiveOffset);
         }
 
         return filteredPoints;
@@ -365,11 +318,10 @@ public class CuttingManager_UCloth : MonoBehaviour
 
     private void ExportUserStudyData()
     {
-        float duration = Time.time - _modeStartTime;
-        float avgFps = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
+        float duration         = Time.time - _modeStartTime;
+        float avgFps           = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
         float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
 
-        // Tìm số thứ tự tự động tăng cho file để không đè dữ liệu cũ
         int fileIndex = 1;
         string fileName = "";
         do
@@ -385,62 +337,12 @@ public class CuttingManager_UCloth : MonoBehaviour
                 sw.WriteLine("Experiment Name,Average FPS,Time (s),Cut Precision Error (m)");
                 sw.WriteLine($"cut,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
             }
-            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm thành công: {fileName}");
+            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất: {fileName}");
         }
         catch (System.Exception e)
         {
-            Debug.LogError($"[UserStudy] Lỗi xuất CSV file: {e.Message}");
+            Debug.LogError($"[UserStudy] Lỗi xuất CSV: {e.Message}");
         }
-    }
-
-    private bool IsTriggerPressedThisFrame()
-    {
-        bool pressed = Input.GetKeyDown(cutTriggerKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftCutTriggerAction?.action != null) pressed |= leftCutTriggerAction.action.WasPressedThisFrame();
-        if (rightCutTriggerAction?.action != null) pressed |= rightCutTriggerAction.action.WasPressedThisFrame();
-#endif
-        return pressed;
-    }
-
-    private bool IsTriggerReleasedThisFrame()
-    {
-        bool released = Input.GetKeyUp(cutTriggerKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftCutTriggerAction?.action != null) released |= leftCutTriggerAction.action.WasReleasedThisFrame();
-        if (rightCutTriggerAction?.action != null) released |= rightCutTriggerAction.action.WasReleasedThisFrame();
-#endif
-        return released;
-    }
-
-    private bool IsDrawHeldNow()
-    {
-        bool held = Input.GetKey(drawStrokeKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftDrawStrokeAction?.action != null) held |= leftDrawStrokeAction.action.IsPressed();
-        if (rightDrawStrokeAction?.action != null) held |= rightDrawStrokeAction.action.IsPressed();
-#endif
-        return held;
-    }
-
-    private bool IsDrawReleasedThisFrame()
-    {
-        bool released = Input.GetKeyUp(drawStrokeKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftDrawStrokeAction?.action != null) released |= leftDrawStrokeAction.action.WasReleasedThisFrame();
-        if (rightDrawStrokeAction?.action != null) released |= rightDrawStrokeAction.action.WasReleasedThisFrame();
-#endif
-        return released;
-    }
-
-    private bool IsCancelPressedThisFrame()
-    {
-        bool pressed = Input.GetKeyDown(cutCancelKey);
-#if ENABLE_INPUT_SYSTEM
-        if (leftCancelCutAction?.action != null) pressed |= leftCancelCutAction.action.WasPressedThisFrame();
-        if (rightCancelCutAction?.action != null) pressed |= rightCancelCutAction.action.WasPressedThisFrame();
-#endif
-        return pressed;
     }
 
     public void RegisterAllClothObjects()
@@ -452,11 +354,11 @@ public class CuttingManager_UCloth : MonoBehaviour
     {
         if (obj == null || _cutters.ContainsKey(obj)) return;
         if (obj.GetComponent<MeshFilter>() == null) return;
-        
+
         var instantCutter = new MeshCutter_UCloth(obj, splitForce);
         instantCutter._minPathPointSpacingOverride = minVisualSpacing;
         instantCutter.Initialize();
-        _cutters[obj] = instantCutter; 
+        _cutters[obj] = instantCutter;
 
         if (obj.GetComponent<UCloth.UCCloth>() != null)
         {
@@ -473,7 +375,8 @@ public class CuttingManager_UCloth : MonoBehaviour
         for (int i = 0; i < sim.Length; i++)
         {
             var p = sim[i];
-            if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z) || float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z))
+            if (float.IsNaN(p.x) || float.IsNaN(p.y) || float.IsNaN(p.z) ||
+                float.IsInfinity(p.x) || float.IsInfinity(p.y) || float.IsInfinity(p.z))
                 return false;
         }
         return true;
@@ -490,7 +393,7 @@ public class CuttingManager_UCloth : MonoBehaviour
             if (obj == null) yield break;
             if (ucCloth.simData != null && ucCloth.simData.positionsReadOnly.IsCreated)
             {
-                yield return new WaitForSeconds(0.05f); 
+                yield return new WaitForSeconds(0.05f);
                 if (obj == null) yield break;
                 if (IsSimDataFinite(ucCloth)) break;
             }
@@ -527,13 +430,13 @@ public class CuttingManager_UCloth : MonoBehaviour
 
         GUIStyle style = new GUIStyle();
         style.alignment = TextAnchor.MiddleCenter;
-        style.fontSize = 28;
+        style.fontSize  = 28;
 
         style.normal.textColor = Color.black;
         GUI.Label(new Rect(Screen.width / 2 - 298, Screen.height - 152, 600, 50), _uiDisplayMessage, style);
         GUI.Label(new Rect(Screen.width / 2 - 302, Screen.height - 148, 600, 50), _uiDisplayMessage, style);
-        
-        style.normal.textColor = Color.red; 
+
+        style.normal.textColor = Color.red;
         GUI.Label(new Rect(Screen.width / 2 - 300, Screen.height - 150, 600, 50), _uiDisplayMessage, style);
     }
 }
