@@ -11,13 +11,17 @@ using Unity.Collections;
 public class UClothPinner2 : MonoBehaviour
 {
     [Header("References")]
-    [Tooltip("Kéo script UClothLaserGrabber (trên cùng Object) vào đây")]
-    public UClothLaserGrabber grabber;
+    [Tooltip("Kéo script UClothLaserGrabber3 (trên cùng Object) vào đây")]
+    public UClothLaserGrabber3 grabber;
 
     [Tooltip("Transform của manocanh (hoặc bone gần điểm ghim nhất). " +
              "Nếu gán, các điểm ghim sẽ bám theo manocanh khi nó di chuyển/xoay. " +
              "Để trống nếu chỉ cần ghim cố định trong không gian (manocanh đứng yên).")]
     public Transform mannequinAnchor;
+
+    [Header("Data Collection Link")]
+    [Tooltip("Kéo object chứa script ClothPinLogger vào đây để ghi nhận dữ liệu bài test Pinning")]
+    public ClothPinLogger pinLogger;
 
     [Header("Input")]
     [Tooltip("Chọn nút bấm để Ghim (VD: XRI RightHand/Primary Button - Nút A)")]
@@ -37,21 +41,29 @@ public class UClothPinner2 : MonoBehaviour
     [Tooltip("Khoảng cách (m) dưới mức này coi như đã tới đích, dừng bơm vận tốc để tránh rung li ti do sai số float")]
     public float snapThreshold = 0.001f;
 
+    [Header("Debug")]
+    [Tooltip("Bật để in log chi tiết từng bước, giúp tìm lỗi tại sao không ghim được")]
+    public bool debugMode = true;
+
     private UCCloth clothComponent;
 
     // Lưu ID hạt vải + tọa độ mục tiêu
-    // (world-space nếu không gán mannequinAnchor, local-space so với anchor nếu có gán)
     private Dictionary<ushort, Vector3> pinnedNodes = new Dictionary<ushort, Vector3>();
 
     private NativeArray<float3> clothPositions;
     private NativeArray<float3> clothVelocities;
     private bool arraysExtracted = false;
 
-    private FieldInfo isGrabbingField;
-    private FieldInfo grabbedNodeIndexField;
-    private FieldInfo grabOffsetField;
+    // --- Reflection Fields Tay Chính ---
+    private FieldInfo isGrabbingMainField;
+    private FieldInfo grabbedNodeIndexMainField;
+    private FieldInfo grabOffsetMainField;
 
-    // Hàng đợi đơn giản, xử lý ở OnSimulationFinishedSafe để tránh sửa NativeArray giữa lúc job đang chạy
+    // --- Reflection Fields Tay Phụ ---
+    private FieldInfo isGrabbingSecField;
+    private FieldInfo grabbedNodeIndexSecField;
+    private FieldInfo grabOffsetSecField;
+
     private bool _pendingPinToggle = false;
     private ushort _pendingNode = ushort.MaxValue;
     private Vector3 _pendingTargetWorldPos;
@@ -59,17 +71,53 @@ public class UClothPinner2 : MonoBehaviour
     void Start()
     {
         clothComponent = GetComponent<UCCloth>();
-        if (grabber == null) grabber = GetComponent<UClothLaserGrabber>();
+        if (clothComponent == null)
+        {
+            Debug.LogError("❌ [Pinner] Không tìm thấy UCCloth trên cùng GameObject. Script sẽ không hoạt động.");
+            return;
+        }
 
-        if (pinAction != null && pinAction.action != null)
+        if (grabber == null) grabber = GetComponent<UClothLaserGrabber3>();
+        if (grabber == null)
+        {
+            Debug.LogError("❌ [Pinner] Không tìm thấy UClothLaserGrabber3. Kéo script vào Inspector.");
+        }
+        else if (debugMode)
+        {
+            Debug.Log($"ℹ️ [Pinner] Đã gán grabber: {grabber.name}");
+        }
+
+        if (pinAction == null || pinAction.action == null)
+        {
+            Debug.LogError("❌ [Pinner] Field 'pinAction' đang để TRỐNG hoặc hỏng.");
+        }
+        else
+        {
             pinAction.action.Enable();
+        }
 
         if (grabber != null)
         {
             Type grabberType = grabber.GetType();
-            isGrabbingField = grabberType.GetField("isGrabbing", BindingFlags.NonPublic | BindingFlags.Instance);
-            grabbedNodeIndexField = grabberType.GetField("grabbedNodeIndex", BindingFlags.NonPublic | BindingFlags.Instance);
-            grabOffsetField = grabberType.GetField("grabOffset", BindingFlags.NonPublic | BindingFlags.Instance);
+            
+            // Lấy dữ liệu nội bộ tay chính
+            isGrabbingMainField = grabberType.GetField("isGrabbingMain", BindingFlags.NonPublic | BindingFlags.Instance);
+            grabbedNodeIndexMainField = grabberType.GetField("grabbedNodeIndexMain", BindingFlags.NonPublic | BindingFlags.Instance);
+            grabOffsetMainField = grabberType.GetField("grabOffsetMain", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            // Lấy dữ liệu nội bộ tay phụ
+            isGrabbingSecField = grabberType.GetField("isGrabbingSec", BindingFlags.NonPublic | BindingFlags.Instance);
+            grabbedNodeIndexSecField = grabberType.GetField("grabbedNodeIndexSec", BindingFlags.NonPublic | BindingFlags.Instance);
+            grabOffsetSecField = grabberType.GetField("grabOffsetSec", BindingFlags.NonPublic | BindingFlags.Instance);
+
+            if (isGrabbingMainField == null || isGrabbingSecField == null)
+            {
+                Debug.LogError("❌ [Pinner] Reflection KHÔNG tìm thấy field trạng thái nắm từ UClothLaserGrabber3.");
+            }
+            else if (debugMode)
+            {
+                Debug.Log("✅ [Pinner] Reflection lấy được đủ dữ liệu nội bộ cho cả 2 tay từ UClothLaserGrabber3.");
+            }
         }
 
         clothComponent.OnSimulationFinished += OnSimulationFinishedSafe;
@@ -80,22 +128,51 @@ public class UClothPinner2 : MonoBehaviour
         if (!arraysExtracted && clothComponent.simData != null)
             ExtractUClothInternalData();
 
-        bool pinPressed = pinAction != null && pinAction.action != null && pinAction.action.WasPressedThisFrame();
+        if (pinAction == null || pinAction.action == null || !pinAction.action.WasPressedThisFrame()) 
+            return;
 
-        if (pinPressed && arraysExtracted && grabber != null && isGrabbingField != null)
+        if (!arraysExtracted || grabber == null || isGrabbingMainField == null) return;
+
+        bool isGrabbingMain = (bool)isGrabbingMainField.GetValue(grabber);
+        bool isGrabbingSec = (bool)isGrabbingSecField.GetValue(grabber);
+
+        ushort nodeToPin = ushort.MaxValue;
+        Vector3 targetPos = Vector3.zero;
+
+        // Ưu tiên kiểm tra tay chính trước, sau đó đến tay phụ
+        if (isGrabbingMain)
         {
-            bool isGrabbing = (bool)isGrabbingField.GetValue(grabber);
-            ushort node = (ushort)grabbedNodeIndexField.GetValue(grabber);
-
-            if (isGrabbing && node != ushort.MaxValue && grabber.vrController != null)
+            ushort node = (ushort)grabbedNodeIndexMainField.GetValue(grabber);
+            if (node != ushort.MaxValue && grabber.vrController != null)
             {
-                _pendingPinToggle = true;
-                _pendingNode = node;
-
-                Vector3 offset = (Vector3)grabOffsetField.GetValue(grabber);
-                _pendingTargetWorldPos = grabber.vrController.TransformPoint(offset);
+                nodeToPin = node;
+                Vector3 offset = (Vector3)grabOffsetMainField.GetValue(grabber);
+                targetPos = grabber.vrController.TransformPoint(offset);
             }
         }
+        else if (isGrabbingSec)
+        {
+            ushort node = (ushort)grabbedNodeIndexSecField.GetValue(grabber);
+            if (node != ushort.MaxValue && grabber.rightController != null)
+            {
+                nodeToPin = node;
+                Vector3 offset = (Vector3)grabOffsetSecField.GetValue(grabber);
+                targetPos = grabber.rightController.TransformPoint(offset);
+            }
+        }
+
+        if (nodeToPin == ushort.MaxValue)
+        {
+            if (debugMode) Debug.LogWarning("⚠️ [Pinner] Bấm nút Pin nhưng không tay nào đang nắm hạt vải hợp lệ.");
+            return;
+        }
+
+        _pendingPinToggle = true;
+        _pendingNode = nodeToPin;
+        _pendingTargetWorldPos = targetPos;
+
+        if (debugMode)
+            Debug.Log($"✅ [Pinner] Yêu cầu ghim đưa vào hàng đợi cho node {_pendingNode}.");
     }
 
     private void OnSimulationFinishedSafe(object sender, EventArgs e)
@@ -108,12 +185,19 @@ public class UClothPinner2 : MonoBehaviour
             if (pinnedNodes.ContainsKey(_pendingNode))
             {
                 pinnedNodes.Remove(_pendingNode);
-                Debug.Log($"🔓 Đã tháo ghim Mềm (Soft Pin), hạt (Index: {_pendingNode}) rơi tự do.");
+                if(debugMode) Debug.Log($"🔓 Đã tháo ghim Mềm, hạt (Index: {_pendingNode}) rơi tự do.");
             }
             else
             {
                 pinnedNodes.Add(_pendingNode, WorldToStored(_pendingTargetWorldPos));
-                Debug.Log($"📌 Đã ghim Mềm (Soft Pin) hạt (Index: {_pendingNode}) trên không!");
+                if(debugMode) Debug.Log($"📌 Đã ghim Mềm hạt (Index: {_pendingNode}) trên không!");
+
+                // === BÁO CÁO CHO DATA LOGGER ===
+                // Gửi thông báo tọa độ mà người dùng vừa ghim thành công sang cho hệ thống Log
+                if (pinLogger != null)
+                {
+                    pinLogger.NotifyPinPlaced(_pendingTargetWorldPos);
+                }
             }
 
             _pendingPinToggle = false;
@@ -121,41 +205,53 @@ public class UClothPinner2 : MonoBehaviour
         }
 
         // 2. CẬP NHẬT TỌA ĐỘ GHIM NẾU NGƯỜI DÙNG ĐANG NẮM KÉO
-        if (grabber != null && isGrabbingField != null && grabber.vrController != null)
+        if (grabber != null)
         {
-            bool isGrabbing = (bool)isGrabbingField.GetValue(grabber);
-            ushort node = (ushort)grabbedNodeIndexField.GetValue(grabber);
-
-            if (isGrabbing && pinnedNodes.ContainsKey(node))
+            // Kiểm tra tay chính
+            if (isGrabbingMainField != null)
             {
-                Vector3 offset = (Vector3)grabOffsetField.GetValue(grabber);
-                Vector3 worldTarget = grabber.vrController.TransformPoint(offset);
-                pinnedNodes[node] = WorldToStored(worldTarget);
+                bool isGrabbingMain = (bool)isGrabbingMainField.GetValue(grabber);
+                ushort nodeMain = (ushort)grabbedNodeIndexMainField.GetValue(grabber);
+                if (isGrabbingMain && pinnedNodes.ContainsKey(nodeMain) && grabber.vrController != null)
+                {
+                    Vector3 offset = (Vector3)grabOffsetMainField.GetValue(grabber);
+                    Vector3 worldTarget = grabber.vrController.TransformPoint(offset);
+                    pinnedNodes[nodeMain] = WorldToStored(worldTarget);
+                }
+            }
+
+            // Kiểm tra tay phụ
+            if (isGrabbingSecField != null)
+            {
+                bool isGrabbingSec = (bool)isGrabbingSecField.GetValue(grabber);
+                ushort nodeSec = (ushort)grabbedNodeIndexSecField.GetValue(grabber);
+                if (isGrabbingSec && pinnedNodes.ContainsKey(nodeSec) && grabber.rightController != null)
+                {
+                    Vector3 offset = (Vector3)grabOffsetSecField.GetValue(grabber);
+                    Vector3 worldTarget = grabber.rightController.TransformPoint(offset);
+                    pinnedNodes[nodeSec] = WorldToStored(worldTarget);
+                }
             }
         }
 
-        // 3. THỰC THI "GHIM MỀM" BẰNG VẬN TỐC — có giảm chấn (damping) + giới hạn vận tốc + deadzone
+        // 3. THỰC THI "GHIM MỀM" BẰNG VẬN TỐC
         foreach (var kvp in pinnedNodes)
         {
             ushort nodeIndex = kvp.Key;
-            if (nodeIndex >= clothPositions.Length) continue; // an toàn nếu số hạt vải thay đổi
+            if (nodeIndex >= clothPositions.Length) continue;
 
             Vector3 targetWorldPos = StoredToWorld(kvp.Value);
-
             float3 currentPos = clothPositions[nodeIndex];
             float3 currentVel = clothVelocities[nodeIndex];
             float3 toTarget = (float3)targetWorldPos - currentPos;
 
             if (math.lengthsq(toTarget) < snapThreshold * snapThreshold)
             {
-                // Đã đủ gần đích, không bơm thêm vận tốc -> tránh rung li ti do sai số dấu phẩy động
                 clothVelocities[nodeIndex] = float3.zero;
                 continue;
             }
 
-            // PD: kéo về đích theo sai số (P), trừ một phần vận tốc hiện tại để dập dao động (D)
             float3 desiredVel = toTarget * pinForce - currentVel * pinDamping;
-
             float speed = math.length(desiredVel);
             if (speed > maxPinSpeed)
                 desiredVel = desiredVel / speed * maxPinSpeed;
@@ -164,13 +260,11 @@ public class UClothPinner2 : MonoBehaviour
         }
     }
 
-    // Quy đổi từ world-space sang dạng lưu trữ: local so với mannequinAnchor (nếu có), hoặc giữ nguyên world
     private Vector3 WorldToStored(Vector3 worldPos)
     {
         return mannequinAnchor != null ? mannequinAnchor.InverseTransformPoint(worldPos) : worldPos;
     }
 
-    // Quy đổi ngược lại sang world-space hiện tại (nếu manocanh đã di chuyển, kết quả sẽ tự cập nhật theo)
     private Vector3 StoredToWorld(Vector3 stored)
     {
         return mannequinAnchor != null ? mannequinAnchor.TransformPoint(stored) : stored;
@@ -189,7 +283,7 @@ public class UClothPinner2 : MonoBehaviour
         if (clothPositions.IsCreated && clothVelocities.IsCreated)
         {
             arraysExtracted = true;
-            Debug.Log("✅ Soft Pinner đã bẻ khóa thành công!");
+            if(debugMode) Debug.Log($"✅ Soft Pinner đã bẻ khóa thành công! ({clothPositions.Length} hạt vải)");
         }
     }
 
@@ -197,7 +291,5 @@ public class UClothPinner2 : MonoBehaviour
     {
         if (clothComponent != null) clothComponent.OnSimulationFinished -= OnSimulationFinishedSafe;
         if (pinAction != null && pinAction.action != null) pinAction.action.Disable();
-
-        // Phiên bản này an toàn tuyệt đối, không cần phục hồi dữ liệu vì ta không sửa mass của hệ thống
     }
 }

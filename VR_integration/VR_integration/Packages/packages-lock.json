@@ -1,7 +1,7 @@
 {
   "dependencies": {
     "com.matusson.ucloth": {
-      "version": "file:D:/VR_Cloth/aoDai_prj/VR_integration/UCloth-master/UCloth-master",
+      "version": "file:E:/DATN/aoDai_prj/VR_integration/UCloth-master/UCloth-master",
       "depth": 0,
       "source": "local",
       "dependencies": {
