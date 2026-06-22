@@ -15,12 +15,17 @@ public class ClothPinLogger : MonoBehaviour
     public int maxPinsRequired = 3;
 
     [Header("Tham chiếu Pin Target")]
-    [Tooltip("Prefab của vòng tròn đích (dùng để instantiate ngẫu nhiên)")]
+    [Tooltip("Prefab của vòng tròn đích (dùng để instantiate ngẫu nhiên). " +
+             "Để trống nếu chỉ cần đếm pin không cần hiển thị target.")]
     public GameObject targetPrefab;
-    [Tooltip("Vị trí gốc (tâm vùng spawn) để sinh ra các điểm cần ghim")]
+    [Tooltip("Vị trí gốc (tâm vùng spawn) để sinh ra các điểm cần ghim. " +
+             "Để trống nếu chỉ cần đếm pin không cần hiển thị target.")]
     public Transform targetAnchor;
     [Tooltip("Bán kính tối đa (mét) để sinh ra điểm ghim quanh Anchor")]
     public float spawnRadius = 0.3f;
+    [Tooltip("Khoảng cách tối đa (mét) để xác định ghim vào đúng target. " +
+             "Khuyến nghị: 0.10 đến 0.20 cho VR tracking.")]
+    public float pinTolerance = 0.15f;
 
     // --- Trạng thái nội bộ ---
     private string csvFilePath;
@@ -35,8 +40,6 @@ public class ClothPinLogger : MonoBehaviour
     
     // Lưu trữ các target hiện tại đang hiển thị
     private List<GameObject> currentTargets = new List<GameObject>();
-    // Lưu thời điểm bắt đầu thao tác ghim cho từng điểm để tính Completion Time riêng rẽ (tuỳ chọn)
-    private float grabStartTime; 
 
     private float fpsAccumulator = 0f;
     private int fpsFrameCount = 0;
@@ -51,11 +54,17 @@ public class ClothPinLogger : MonoBehaviour
             Debug.Log($"[ClothPinLogger] Đã tự động tạo thư mục: {folderPath}");
         }
 
-        // Tạo một file riêng cho bài test Pinning
         csvFilePath = Path.Combine(folderPath, "ClothPin_Experiment_RawData.csv");
         EnsureCsvHeaderAndResumeState();
+
+        // ✅ FIX: Cảnh báo sớm nếu thiếu reference, thay vì âm thầm không ghi gì
+        if (targetPrefab == null)
+            Debug.LogWarning("⚠️ [ClothPinLogger] targetPrefab chưa được gán! " +
+                             "Targets sẽ không hiển thị, nhưng mọi pin đều được đếm và ghi CSV bình thường.");
+        if (targetAnchor == null)
+            Debug.LogWarning("⚠️ [ClothPinLogger] targetAnchor chưa được gán! " +
+                             "Targets sẽ không hiển thị, nhưng mọi pin đều được đếm và ghi CSV bình thường.");
         
-        // Bắt đầu trial đầu tiên ngay khi play
         StartNewTrial();
     }
 
@@ -73,10 +82,6 @@ public class ClothPinLogger : MonoBehaviour
     {
         if (!File.Exists(csvFilePath))
         {
-            // Các metric cho Pinning: 
-            // - Pins Required: Số điểm hệ thống yêu cầu ghim trong Trial này
-            // - Total Time: Thời gian hoàn thành việc ghim tất cả các điểm
-            // Có thể thêm Error Distance (khoảng cách sai lệch trung bình của các điểm ghim so với target) nếu cần
             string header = "Participant,Trial,Resolution,Pins Required,Start Time,End Time,Total Time (s),FPS Avg\n";
             File.WriteAllText(csvFilePath, header);
             currentParticipantID = 1;
@@ -85,7 +90,6 @@ public class ClothPinLogger : MonoBehaviour
         }
         else
         {
-            // Logic đọc lại file cũ tương tự như GrabLogger
             try
             {
                 string[] lines = File.ReadAllLines(csvFilePath);
@@ -152,19 +156,19 @@ public class ClothPinLogger : MonoBehaviour
 
     private void SpawnTargets(int count)
     {
-        // Xóa các target cũ (nếu có)
         foreach(var t in currentTargets)
         {
             if(t != null) Destroy(t);
         }
         currentTargets.Clear();
 
+        // Nếu thiếu reference thì bỏ qua phần spawn — đếm pin vẫn hoạt động bình thường
         if (targetPrefab == null || targetAnchor == null) return;
 
         for (int i = 0; i < count; i++)
         {
             Vector3 randomOffset = UnityEngine.Random.insideUnitSphere * spawnRadius;
-            randomOffset.z = 0; // Tùy chọn khóa trục Z giống Grab
+            randomOffset.z = 0;
             
             Vector3 spawnPos = targetAnchor.position + randomOffset;
             GameObject newTarget = Instantiate(targetPrefab, spawnPos, Quaternion.identity);
@@ -174,41 +178,59 @@ public class ClothPinLogger : MonoBehaviour
     }
 
     /// <summary>
-    /// Được gọi từ UClothPinner khi người dùng ghim thành công một điểm
+    /// Được gọi từ UClothPinner khi người dùng ghim thành công một điểm.
+    /// Mọi pin hợp lệ đều được đếm và ghi CSV.
+    /// Nếu có targets đang hiển thị thì cũng kiểm tra độ gần để destroy target tương ứng.
     /// </summary>
     public void NotifyPinPlaced(Vector3 pinPosition)
     {
-        if (!IsTrialActive) return;
-
-        // Tùy chọn: Ở đây bạn có thể kiểm tra xem điểm ghim có nằm gần một trong các Target không.
-        // Nếu gần, tức là ghim đúng chỗ, thì ta tắt Target đó đi và tăng biến đếm.
-        bool pinnedCorrectly = false;
-        float tolerance = 0.05f; // Sai số 5cm
-
-        for (int i = currentTargets.Count - 1; i >= 0; i--)
+        if (!IsTrialActive)
         {
-            if (currentTargets[i] != null)
+            Debug.LogWarning("[ClothPinLogger] NotifyPinPlaced được gọi nhưng IsTrialActive = false. Bỏ qua.");
+            return;
+        }
+
+        // ✅ FIX: Kiểm tra target là tuỳ chọn — không chặn việc đếm pin
+        if (currentTargets.Count > 0)
+        {
+            bool hitTarget = false;
+            for (int i = currentTargets.Count - 1; i >= 0; i--)
             {
-                float dist = Vector3.Distance(pinPosition, currentTargets[i].transform.position);
-                if (dist <= tolerance)
+                if (currentTargets[i] != null)
                 {
-                    // Ghim đúng vào target này
-                    Destroy(currentTargets[i]);
-                    currentTargets.RemoveAt(i);
-                    currentPinsPlaced++;
-                    pinnedCorrectly = true;
-                    Debug.Log($"[LOG] Đã ghim trúng 1 điểm! (Cách đích: {dist*100f:F1}cm). Còn lại: {currentPinsRequired - currentPinsPlaced}");
-                    break; 
+                    float dist = Vector3.Distance(pinPosition, currentTargets[i].transform.position);
+                    // In log khoảng cách để dễ tinh chỉnh pinTolerance trong Inspector
+                    Debug.Log($"[LOG] Khoảng cách tới PinTarget_{i}: {dist * 100f:F1}cm (tolerance = {pinTolerance * 100f:F0}cm)");
+
+                    if (dist <= pinTolerance)
+                    {
+                        Destroy(currentTargets[i]);
+                        currentTargets.RemoveAt(i);
+                        hitTarget = true;
+                        Debug.Log($"[LOG] ✅ Ghim trúng target! (Cách đích: {dist * 100f:F1}cm)");
+                        break;
+                    }
                 }
             }
-        }
 
-        if (!pinnedCorrectly)
+            if (!hitTarget)
+            {
+                // Cảnh báo nhưng vẫn đếm — giúp phát hiện nếu targetAnchor đặt sai chỗ
+                Debug.LogWarning($"[LOG] ⚠️ Pin tại {pinPosition} không trúng target nào trong phạm vi {pinTolerance * 100f:F0}cm. " +
+                                 "Vẫn đếm vào tổng. Nếu thấy cảnh báo này thường xuyên, hãy kiểm tra vị trí targetAnchor " +
+                                 "hoặc tăng pinTolerance trong Inspector.");
+            }
+        }
+        else
         {
-            Debug.Log("[LOG] Ghim sai vị trí (quá xa các target).");
+            // Không có target nào (chưa gán prefab/anchor) — đây là mode đếm đơn giản
+            Debug.Log("[LOG] Không có target nào trong scene (targetPrefab/targetAnchor chưa gán). Đếm pin trực tiếp.");
         }
 
-        // Kiểm tra xem đã ghim đủ số điểm yêu cầu chưa
+        // ✅ FIX: Luôn đếm pin bất kể có trúng target hay không
+        currentPinsPlaced++;
+        Debug.Log($"[LOG] Tổng pin đã đặt: {currentPinsPlaced}/{currentPinsRequired}");
+
         if (currentPinsPlaced >= currentPinsRequired)
         {
             EndTrial();
@@ -229,7 +251,6 @@ public class ClothPinLogger : MonoBehaviour
 
         AdvanceExperimentProgression();
         
-        // Nghỉ một chút hoặc bắt đầu ngay trial mới
         StartNewTrial();
     }
 
@@ -241,6 +262,7 @@ public class ClothPinLogger : MonoBehaviour
         try
         {
             File.AppendAllText(csvFilePath, csvLine);
+            Debug.Log($"[ClothPinLogger] ✅ Đã ghi dữ liệu vào CSV: {csvLine.Trim()}");
         }
         catch (IOException ex)
         {
