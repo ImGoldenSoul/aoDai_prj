@@ -1044,12 +1044,12 @@ public class MeshSewer_UCloth
         }
 
         // ── 5. Khôi phục tương tác Laser Grabber trong VR ──
-        // SỬA: Khôi phục tương tác theo cơ chế của UClothLaserGrabber2 sau khi khâu
-        var grabSrc = _goA.GetComponent<UClothLaserGrabber2>()
-                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber2>());
+        // SỬA: Khôi phục tương tác theo cơ chế của UClothLaserGrabber3 sau khi khâu
+        var grabSrc = _goA.GetComponent<UClothLaserGrabber3>()
+                      ?? (_isSelfSew ? null : _goB?.GetComponent<UClothLaserGrabber3>());
         if (grabSrc != null)
         {
-            var gr = go.AddComponent<UClothLaserGrabber2>();
+            var gr = go.AddComponent<UClothLaserGrabber3>();
             gr.vrController       = grabSrc.vrController;
             gr.triggerAction      = grabSrc.triggerAction;
             gr.rightController    = grabSrc.rightController;
@@ -1058,6 +1058,31 @@ public class MeshSewer_UCloth
             gr.sphereSize         = grabSrc.sphereSize;
             gr.hoverColor         = grabSrc.hoverColor;
             gr.grabColor          = grabSrc.grabColor;
+        }
+
+        // ── 6. Khôi phục UClothPinner2 cho mesh khâu mới ──
+        // SỬA: Thêm UClothPinner2 SAU khi UClothLaserGrabber3 đã được AddComponent,
+        // vì UClothPinner2.Start() dùng GetComponent<UClothLaserGrabber3>() trên cùng GameObject.
+        var pinSrc = _goA.GetComponent<UClothPinner2>()
+                     ?? (_isSelfSew ? null : _goB?.GetComponent<UClothPinner2>());
+        if (pinSrc != null)
+        {
+            var pinner = go.AddComponent<UClothPinner2>();
+
+            // Gán grabber mới vừa thêm vào go (nếu có), không giữ ref của mesh gốc
+            pinner.grabber         = go.GetComponent<UClothLaserGrabber3>();
+
+            // Copy tham chiếu ngoài + cài đặt từ pinner nguồn
+            pinner.mannequinAnchor = pinSrc.mannequinAnchor;
+            pinner.pinLogger       = pinSrc.pinLogger;
+            pinner.pinAction       = pinSrc.pinAction;
+            pinner.pinForce        = pinSrc.pinForce;
+            pinner.pinDamping      = pinSrc.pinDamping;
+            pinner.maxPinSpeed     = pinSrc.maxPinSpeed;
+            pinner.snapThreshold   = pinSrc.snapThreshold;
+            pinner.debugMode       = pinSrc.debugMode;
+
+            Debug.Log($"[MeshSewer] UClothPinner2 đã đồng bộ cho '{newName}'.");
         }
 
         SafeDisableUCloth(_goA);

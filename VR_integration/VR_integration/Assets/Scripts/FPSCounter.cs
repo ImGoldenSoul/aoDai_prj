@@ -11,10 +11,10 @@ public class FPSCounter : MonoBehaviour
     private int frames = 0;
     private float timeleft;
 
-    // Biến cho Thí nghiệm (Total Average FPS)
+    // Biến cho Thí nghiệm (Total Average FPS chuẩn)
     private bool isRecording = false;
-    private float sessionAccum = 0f;
-    private int sessionFrames = 0;
+    private float sessionTotalTime = 0f; // Tổng thời gian chạy thí nghiệm
+    private int sessionFrames = 0;        // Tổng số frame bắt được
 
     void Start()
     {
@@ -23,9 +23,12 @@ public class FPSCounter : MonoBehaviour
 
     void Update()
     {
-        // 1. Logic cho UI (giữ nguyên để bạn nhìn thấy số trên màn hình)
-        timeleft -= Time.deltaTime;
-        accum += Time.timeScale / Time.deltaTime;
+        // Lấy thời gian thực của frame hiện tại (bất chấp timeScale)
+        float dt = Time.unscaledDeltaTime;
+
+        // 1. Logic cho UI
+        timeleft -= dt;
+        accum += 1.0f / dt;
         ++frames;
 
         if (timeleft <= 0.0)
@@ -39,31 +42,32 @@ public class FPSCounter : MonoBehaviour
             frames = 0;
         }
 
-        // 2. Logic tính Average FPS cho cả phiên thí nghiệm
+        // 2. Logic tính Average FPS cho cả phiên thí nghiệm (Chuẩn khoa học)
         if (isRecording)
         {
-            // Cộng dồn để tính trung bình cộng thực sự
-            sessionAccum += Time.timeScale / Time.deltaTime;
-            sessionFrames++;
+            sessionTotalTime += dt; // Cộng dồn tổng thời gian thực
+            sessionFrames++;        // Cộng dồn tổng số khung hình
         }
 
         // 3. Phím tắt để Start/Stop thí nghiệm
-        if (Input.GetKeyDown(KeyCode.X)) // Nhấn phím X để Bắt đầu/Kết thúc
+        if (Input.GetKeyDown(KeyCode.X)) 
         {
             if (!isRecording) 
             {
-                // Bắt đầu
                 isRecording = true;
-                sessionAccum = 0f;
+                sessionTotalTime = 0f;
                 sessionFrames = 0;
                 Debug.Log("--- BẮT ĐẦU GHI FPS TRUNG BÌNH ---");
             }
             else 
             {
-                // Kết thúc và In ra kết quả
                 isRecording = false;
-                float avgFPS = sessionAccum / sessionFrames;
-                Debug.Log(">> KẾT QUẢ THÍ NGHIỆM: FPS TRUNG BÌNH = " + avgFPS.ToString("F2") + " FPS");
+                
+                // Tránh lỗi chia cho 0 nếu tắt quá nhanh
+                float avgFPS = (sessionTotalTime > 0) ? (sessionFrames / sessionTotalTime) : 0f;
+                
+                Debug.Log($">> KẾT QUẢ THÍ NGHIỆM: Tổng thời gian = {sessionTotalTime:F2}s | Tổng số Frames = {sessionFrames}");
+                Debug.Log($">> FPS TRUNG BÌNH THỰC TẾ = {avgFPS:F2} FPS");
             }
         }
     }

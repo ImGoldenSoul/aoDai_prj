@@ -1,5 +1,5 @@
 // ============================================================
-//  CuttingManager_UCloth.cs  — v14.1 (VR Input Fixed)
+//  CuttingManager_UCloth.cs  — v14.3 (Fix AreaLoss: originalArea pre-cut + areaLoss metric)
 // ============================================================
 
 using System.Collections;
@@ -70,6 +70,12 @@ public class CuttingManager_UCloth : MonoBehaviour
     private int _fpsFrameCount;
     private float _fpsAccumulatedTime;
     private List<float> _precisionErrors = new List<float>();
+
+    // ── AREA LOSS METRICS (v14.3) ──
+    // Tổng diện tích gốc (pre-cut) của tất cả các mesh đã bị cắt trong session này
+    private float _sessionOriginalAreaTotal = 0f;
+    // Tổng diện tích sau cắt (tổng các piece) trong session này
+    private float _sessionPostCutAreaTotal  = 0f;
 
     // ── FIX: Enable/Disable tất cả InputAction để VR controller hoạt động ──
 #if ENABLE_INPUT_SYSTEM
@@ -202,6 +208,10 @@ public class CuttingManager_UCloth : MonoBehaviour
                     _fpsAccumulatedTime = 0f;
                     _precisionErrors.Clear();
 
+                    // Reset area loss counters cho session mới (v14.3)
+                    _sessionOriginalAreaTotal = 0f;
+                    _sessionPostCutAreaTotal  = 0f;
+
                     // Khóa di chuyển hệ thống để giữ nguyên Viewport hiện tại
                     SetLocomotionEnabled(false);
                 }
@@ -308,12 +318,21 @@ public class CuttingManager_UCloth : MonoBehaviour
 
             if (dynamicMeshIntersectionPath != null && dynamicMeshIntersectionPath.Count >= 2)
             {
-                // Tính toán Precision Error (khoảng cách sai lệch giữa tay và điểm chạm vật lý tương ứng)
-                int validCount = Mathf.Min(_visualStrokePoints.Count, dynamicMeshIntersectionPath.Count);
-                for (int i = 0; i < validCount; i++)
+                // Tính Cut Precision Error: perpendicular distance từ mỗi điểm projected
+                // đến reference line nối P1→PN (theo công thức E_cut).
+                Vector3 p1    = dynamicMeshIntersectionPath[0];
+                Vector3 pN    = dynamicMeshIntersectionPath[dynamicMeshIntersectionPath.Count - 1];
+                Vector3 lineDir = pN - p1;
+                float   lineLen = lineDir.magnitude;
+                if (lineLen > 0.001f)
                 {
-                    float dist = Vector3.Distance(_visualStrokePoints[i], dynamicMeshIntersectionPath[i]);
-                    _precisionErrors.Add(dist);
+                    Vector3 lineDirNorm = lineDir / lineLen;
+                    foreach (var pt in dynamicMeshIntersectionPath)
+                    {
+                        float   t       = Mathf.Clamp01(Vector3.Dot(pt - p1, lineDirNorm) / lineLen);
+                        Vector3 closest = p1 + t * lineDir;
+                        _precisionErrors.Add(Vector3.Distance(pt, closest));
+                    }
                 }
 
                 mc.ClearPath();
@@ -323,9 +342,57 @@ public class CuttingManager_UCloth : MonoBehaviour
                 if (result == CutResult_Ucloth.Split)
                 {
                     var newPieces = mc.GetLastCreatedPieces();
+
+                    // ── v14.3: Đo diện tích mesh GỐC trước khi deactivate ──
+                    float originalArea = 0f;
+                    var originalMf = target.GetComponent<MeshFilter>();
+                    if (originalMf != null && originalMf.sharedMesh != null)
+                        originalArea = ClothAreaCalculator.CalculateAreaFromMesh(
+                            originalMf.sharedMesh, target.transform.lossyScale);
+
                     target.SetActive(false);
                     _cutters.Remove(target);
                     _ucClothObjects.Remove(target);
+
+                    // ── v14.3: Đo tổng diện tích các piece sau cắt ──
+                    float totalPieceArea = 0f;
+                    var pieceMeshData = new List<(GameObject go, Mesh mesh)>();
+                    foreach (var piece in newPieces)
+                    {
+                        var mf = piece.GetComponent<MeshFilter>();
+                        if (mf != null && mf.sharedMesh != null)
+                        {
+                            float a = ClothAreaCalculator.CalculateAreaFromMesh(
+                                mf.sharedMesh, piece.transform.lossyScale);
+                            totalPieceArea += a;
+                            pieceMeshData.Add((piece, mf.sharedMesh));
+                        }
+                    }
+
+                    // ── v14.3: Tính loss ──
+                    float areaLoss      = Mathf.Max(0f, originalArea - totalPieceArea);
+                    float areaLossRatio = originalArea > 0f ? areaLoss / originalArea : 0f;
+
+                    // Tích lũy vào session totals
+                    _sessionOriginalAreaTotal += originalArea;
+                    _sessionPostCutAreaTotal  += totalPieceArea;
+
+                    Debug.Log($"<color=cyan>[AreaLoss]</color> " +
+                              $"Original={originalArea*1e4f:F2}cm² | " +
+                              $"PostCut={totalPieceArea*1e4f:F2}cm² | " +
+                              $"Loss={areaLoss*1e4f:F4}cm² ({areaLossRatio*100f:F2}%)");
+
+                    // ── Gắn ClothAreaData vào từng piece (dùng originalArea pre-cut) ──
+                    foreach (var (go, mesh) in pieceMeshData)
+                    {
+                        float pieceArea = ClothAreaCalculator.CalculateAreaFromMesh(
+                            mesh, go.transform.lossyScale);
+                        var data          = go.AddComponent<ClothAreaData>();
+                        data.originalArea = originalArea;       // ← diện tích mesh gốc trước khi cắt
+                        data.pieceArea    = pieceArea;
+                        data.seamArea     = areaLoss;           // ← loss thực: original − tổng piece
+                        data.seamRatio    = areaLossRatio;
+                    }
 
                     foreach (var piece in newPieces) RegisterClothObject(piece);
                     break;
@@ -405,6 +472,12 @@ public class CuttingManager_UCloth : MonoBehaviour
         float avgFps = _fpsAccumulatedTime > 0f ? (_fpsFrameCount / _fpsAccumulatedTime) : 0f;
         float avgPrecisionError = _precisionErrors.Count > 0 ? _precisionErrors.Average() : 0f;
 
+        // ── v14.3: Dùng session totals thay vì scan FindObjectsOfType ──
+        // (FindObjectsOfType chỉ thấy các piece hiện còn trong scene, bỏ sót piece đã bị cắt tiếp)
+        float sessionAreaLoss      = Mathf.Max(0f, _sessionOriginalAreaTotal - _sessionPostCutAreaTotal);
+        float sessionAreaLossRatio = _sessionOriginalAreaTotal > 0f
+            ? sessionAreaLoss / _sessionOriginalAreaTotal : 0f;
+
         // Tìm số thứ tự tự động tăng cho file để không đè dữ liệu cũ
         int fileIndex = 1;
         string fileName = "";
@@ -418,10 +491,22 @@ public class CuttingManager_UCloth : MonoBehaviour
         {
             using (StreamWriter sw = new StreamWriter(fileName))
             {
-                sw.WriteLine("Experiment Name,Average FPS,Time (s),Cut Precision Error (m)");
-                sw.WriteLine($"cut,{avgFps:F2},{duration:F3},{avgPrecisionError:F4}");
+                // Header (v14.3: thêm các cột area loss)
+                sw.WriteLine("Experiment Name,Average FPS,Time (s),Cut Precision Error (m)," +
+                             "Original Area (m2),Post-Cut Area (m2),Area Loss (m2),Area Loss Ratio");
+                sw.WriteLine($"cut," +
+                             $"{avgFps:F2}," +
+                             $"{duration:F3}," +
+                             $"{avgPrecisionError:F4}," +
+                             $"{_sessionOriginalAreaTotal:F6}," +
+                             $"{_sessionPostCutAreaTotal:F6}," +
+                             $"{sessionAreaLoss:F6}," +
+                             $"{sessionAreaLossRatio:F4}");
             }
-            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm thành công: {fileName}");
+            Debug.Log($"<color=green>[UserStudy]</color> Đã xuất báo cáo thực nghiệm: {fileName}\n" +
+                      $"  Original={_sessionOriginalAreaTotal*1e4f:F2}cm² | " +
+                      $"PostCut={_sessionPostCutAreaTotal*1e4f:F2}cm² | " +
+                      $"Loss={sessionAreaLoss*1e4f:F4}cm² ({sessionAreaLossRatio*100f:F2}%)");
         }
         catch (System.Exception e)
         {

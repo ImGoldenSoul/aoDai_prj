@@ -46,7 +46,7 @@ public class ClothGrabLogger : MonoBehaviour
 
     void Start()
     {
-        string folderPath = @"E:\DATN\aoDai_prj\VR_integration\UserStudy";
+        string folderPath = @"C:\Users\toikh\Documents\3D_Museum\aoDai_prj\VR_integration\UserStudy";
         
         if (!Directory.Exists(folderPath))
         {

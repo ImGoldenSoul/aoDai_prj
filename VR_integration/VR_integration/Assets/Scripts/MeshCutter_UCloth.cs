@@ -384,11 +384,11 @@ public class MeshCutter_UCloth
             rb.useGravity  = true;
             rb.isKinematic = true;
 
-            // SỬA: Chuyển đổi tính chất sang UClothLaserGrabber2 cho các mảnh con sau khi cắt
-            var originalGrabber = _target.GetComponent<UClothLaserGrabber2>();
+            // SỬA: Chuyển đổi tính chất sang UClothLaserGrabber3 cho các mảnh con sau khi cắt
+            var originalGrabber = _target.GetComponent<UClothLaserGrabber3>();
             if (originalGrabber != null)
             {
-                var newGrabber = piece.AddComponent<UClothLaserGrabber2>();
+                var newGrabber = piece.AddComponent<UClothLaserGrabber3>();
                 newGrabber.vrController       = originalGrabber.vrController;
                 newGrabber.triggerAction      = originalGrabber.triggerAction;
                 newGrabber.rightController    = originalGrabber.rightController;
@@ -397,6 +397,27 @@ public class MeshCutter_UCloth
                 newGrabber.sphereSize         = originalGrabber.sphereSize;
                 newGrabber.hoverColor         = originalGrabber.hoverColor;
                 newGrabber.grabColor          = originalGrabber.grabColor;
+            }
+
+            // SỬA: Chuyển đổi tính chất sang UClothPinner2 cho các mảnh con sau khi cắt
+            // (phải AddComponent TRƯỚC khi gán grabber vì UClothPinner2.Start() dùng GetComponent<UClothLaserGrabber3>)
+            var originalPinner = _target.GetComponent<UClothPinner2>();
+            if (originalPinner != null)
+            {
+                var newPinner = piece.AddComponent<UClothPinner2>();
+
+                // Gán grabber mới vừa thêm vào piece (nếu có), thay vì grabber của mesh gốc
+                newPinner.grabber         = piece.GetComponent<UClothLaserGrabber3>();
+
+                // Copy các tham chiếu ngoài + cài đặt từ pinner gốc
+                newPinner.mannequinAnchor = originalPinner.mannequinAnchor;
+                newPinner.pinLogger       = originalPinner.pinLogger;
+                newPinner.pinAction       = originalPinner.pinAction;
+                newPinner.pinForce        = originalPinner.pinForce;
+                newPinner.pinDamping      = originalPinner.pinDamping;
+                newPinner.maxPinSpeed     = originalPinner.maxPinSpeed;
+                newPinner.snapThreshold   = originalPinner.snapThreshold;
+                newPinner.debugMode       = originalPinner.debugMode;
             }
 
             Debug.Log($"[MeshCutter_UCloth] Piece '{name}': UCCloth added, {mesh.vertexCount} verts, {tc} tris.");
