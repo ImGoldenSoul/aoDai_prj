@@ -290,6 +290,27 @@ public class UClothPinner2 : MonoBehaviour
     void OnDestroy()
     {
         if (clothComponent != null) clothComponent.OnSimulationFinished -= OnSimulationFinishedSafe;
-        if (pinAction != null && pinAction.action != null) pinAction.action.Disable();
+
+        // FIX: pinAction là InputActionReference dùng CHUNG (shared asset) giữa tất cả các
+        // UClothPinner2 — kể cả các piece sinh ra sau khi cắt/khâu. Nếu Disable() ở đây,
+        // khi mesh gốc bị SetActive(false)/Destroy sau khi cắt, action sẽ bị tắt và tất
+        // cả pinner mới trên các piece không nhận được input nữa (pin button không phản hồi).
+        // Sửa: chỉ Disable action nếu KHÔNG còn UClothPinner2 nào khác trong scene đang
+        // dùng cùng action này. Nếu còn pinner khác đang sống → giữ action enabled.
+        if (pinAction != null && pinAction.action != null)
+        {
+            bool anotherPinnerExists = false;
+            foreach (var other in FindObjectsOfType<UClothPinner2>())
+            {
+                if (other == this) continue;
+                if (other.pinAction != null && other.pinAction.action == pinAction.action)
+                {
+                    anotherPinnerExists = true;
+                    break;
+                }
+            }
+            if (!anotherPinnerExists)
+                pinAction.action.Disable();
+        }
     }
 }

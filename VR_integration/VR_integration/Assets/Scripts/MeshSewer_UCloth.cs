@@ -37,6 +37,10 @@ public class MeshSewer_UCloth
     private UCloth.UCCloth _ucA, _ucB;
     private DMesh3         _combined;
 
+    // ── [AREA-LOG] Diện tích mesh A/B TRƯỚC khi khâu (world-space, m²) ─────
+    private float _areaBeforeA = 0f;
+    private float _areaBeforeB = 0f;
+
     // Phân vùng vertex trong combined mesh (chỉ dùng cho two-mesh)
     private HashSet<int> _regionA = new HashSet<int>();
     private HashSet<int> _regionB = new HashSet<int>();
@@ -65,6 +69,30 @@ public class MeshSewer_UCloth
                 if (_combined.IsBoundaryEdge(eid)) return true;
             return false;
         }
+    }
+
+    // ── [AREA-LOG] Tính diện tích một DMesh3 (world-space, m²) ─────────────
+    /// <summary>
+    /// Tổng diện tích tất cả triangle hợp lệ của một DMesh3.
+    /// Dùng cho log diện tích mesh A/B TRƯỚC khâu (dmA/dmB đã ở world-space
+    /// vì G3MeshBridge.ToDMesh3 được gọi với useWorldSpace:true).
+    /// </summary>
+    private static float ComputeDMesh3Area(DMesh3 mesh)
+    {
+        if (mesh == null) return 0f;
+
+        float area = 0f;
+        foreach (int tid in mesh.TriangleIndices())
+        {
+            if (!mesh.IsTriangle(tid)) continue;
+            Vector3d a = Vector3d.Zero, b = Vector3d.Zero, c = Vector3d.Zero;
+            mesh.GetTriVertices(tid, ref a, ref b, ref c);
+            Vector3 va = new Vector3((float)a.x, (float)a.y, (float)a.z);
+            Vector3 vb = new Vector3((float)b.x, (float)b.y, (float)b.z);
+            Vector3 vc = new Vector3((float)c.x, (float)c.y, (float)c.z);
+            area += Vector3.Cross(vb - va, vc - va).magnitude * 0.5f;
+        }
+        return area;
     }
 
     // ── Constructor ───────────────────────────────────────────────────────
@@ -108,10 +136,16 @@ public class MeshSewer_UCloth
         DMesh3 dmA = G3MeshBridge.ToDMesh3(mfA.mesh, _goA.transform, out _, useWorldSpace: true);
         if (dmA == null) { Debug.LogError("[MeshSewer] ToDMesh3(A) thất bại."); return false; }
 
+        // [AREA-LOG] Diện tích mesh A trước khi khâu (world-space, đã bao gồm scale vì ToDMesh3 dùng useWorldSpace:true)
+        _areaBeforeA = ComputeDMesh3Area(dmA);
+        Debug.Log($"<color=yellow>[MeshSewer][Area] Mesh A ('{_goA.name}') TRƯỚC khâu: " +
+                  $"{_areaBeforeA:F6} m²  ({_areaBeforeA * 10000f:F2} cm²)</color>");
+
         _combined = new DMesh3(dmA, bCompact: true);
 
         if (_isSelfSew)
         {
+            _areaBeforeB = _areaBeforeA; // tự khâu → cùng 1 mesh
             Debug.Log($"[MeshSewer] Khởi tạo Tự khâu — {_combined.VertexCount} verts, {_combined.TriangleCount} tris");
         }
         else
@@ -124,6 +158,13 @@ public class MeshSewer_UCloth
 
             DMesh3 dmB = G3MeshBridge.ToDMesh3(mfB.mesh, _goB.transform, out _, useWorldSpace: true);
             if (dmB == null) { Debug.LogError("[MeshSewer] ToDMesh3(B) thất bại."); return false; }
+
+            // [AREA-LOG] Diện tích mesh B trước khi khâu (world-space)
+            _areaBeforeB = ComputeDMesh3Area(dmB);
+            Debug.Log($"<color=yellow>[MeshSewer][Area] Mesh B ('{_goB.name}') TRƯỚC khâu: " +
+                      $"{_areaBeforeB:F6} m²  ({_areaBeforeB * 10000f:F2} cm²)</color>");
+            Debug.Log($"<color=yellow>[MeshSewer][Area] Tổng diện tích A+B TRƯỚC khâu: " +
+                      $"{(_areaBeforeA + _areaBeforeB):F6} m²  ({(_areaBeforeA + _areaBeforeB) * 10000f:F2} cm²)</color>");
 
             var idMapB = new IndexMap(true);
             new MeshEditor(_combined).AppendMesh(dmB, idMapB, out _);
@@ -987,6 +1028,28 @@ public class MeshSewer_UCloth
         unityMesh.RecalculateNormals();
         unityMesh.RecalculateBounds();
         unityMesh.RecalculateTangents();
+
+        // ── [AREA-LOG] Diện tích mesh SAU khi khâu ──
+        // unityMesh đang ở local-space của 'go' (go.transform.localScale = _goA.transform.localScale)
+        // → dùng ClothAreaCalculator.CalculateAreaFromMesh để nhân lại lossyScale ra world-space.
+        float areaBeforeTotal = _isSelfSew ? _areaBeforeA : (_areaBeforeA + _areaBeforeB);
+        float areaAfter       = ClothAreaCalculator.CalculateAreaFromMesh(unityMesh, go.transform.lossyScale);
+        float areaSeamLost    = Mathf.Max(0f, areaBeforeTotal - areaAfter);
+        float seamRatio       = areaBeforeTotal > 0f ? areaSeamLost / areaBeforeTotal : 0f;
+
+        Debug.Log($"<color=cyan>[MeshSewer][Area] ===== BÁO CÁO DIỆN TÍCH KHÂU ('{newName}') =====\n" +
+                  $"  A trước khâu : {_areaBeforeA:F6} m² ({_areaBeforeA * 10000f:F2} cm²)\n" +
+                  (_isSelfSew ? "" :
+                  $"  B trước khâu : {_areaBeforeB:F6} m² ({_areaBeforeB * 10000f:F2} cm²)\n" +
+                  $"  Tổng A+B     : {areaBeforeTotal:F6} m² ({areaBeforeTotal * 10000f:F2} cm²)\n") +
+                  $"  SAU khâu     : {areaAfter:F6} m² ({areaAfter * 10000f:F2} cm²)\n" +
+                  $"  Seam mất     : {areaSeamLost:F6} m² ({areaSeamLost * 10000f:F2} cm²)  [{seamRatio * 100f:F2}%]</color>");
+
+        var areaData = go.AddComponent<ClothAreaData>();
+        areaData.originalArea = areaBeforeTotal;
+        areaData.pieceArea    = areaAfter;
+        areaData.seamArea     = areaSeamLost;
+        areaData.seamRatio    = Mathf.Clamp01(seamRatio);
 
         go.AddComponent<MeshFilter>().mesh = unityMesh;
 
